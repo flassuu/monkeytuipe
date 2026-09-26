@@ -1,0 +1,16 @@
+# Build artifacts
+/target
+**/*.rs.bk
+
+# Research notes: personal working documentation, not part of the crate.
+RESEARCH.md
+research/
+
+# Local config
+config.toml
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

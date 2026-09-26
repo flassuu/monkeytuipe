@@ -1,0 +1,48 @@
+[package]
+name = "monkeytuipe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+description = "Terminal typing test client for monkeytype.com with ApeKey sync"
+license = "MIT"
+repository = "https://github.com/flassuu/monkeytuipe"
+readme = "README.md"
+keywords = ["monkeytype", "typing", "tui", "terminal", "ratatui"]
+categories = ["command-line-utilities"]
+
+[lib]
+name = "monkeytuipe"
+path = "src/lib.rs"
+
+[[bin]]
+name = "monkeytuipe"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.28"
+crossterm = "0.28"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "sync",
+    "fs",
+    "signal",
+] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "gzip",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+unicode-width = "0.1" # must match the version ratatui lays text out with
+dirs = "5"
+
+[profile.release]
+lto = "thin"
+strip = true
