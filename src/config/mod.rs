@@ -121,6 +121,17 @@ pub enum Difficulty {
     Master,
 }
 
+impl Difficulty {
+    /// The name as it appears in the config file and in the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Expert => "expert",
+            Self::Master => "master",
+        }
+    }
+}
+
 impl Mode {
     /// The name as it appears in the config file and in the UI.
     pub fn as_str(self) -> &'static str {

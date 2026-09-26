@@ -195,7 +195,9 @@ impl Settings {
                 Vec::new()
             }
             Action::Left | Action::Right => match row {
-                Row::Theme => vec![Effect::Adjust(row)],
+                // Theme and difficulty are short ordered lists, so a step is the
+                // right thing to do with left and right.
+                Row::Theme | Row::Difficulty => vec![Effect::Adjust(row)],
                 // The others are not "one step from the last": they are a list or
                 // a sentence, and stepping through a list of two hundred by
                 // pressing right is a way of never choosing one.
@@ -400,6 +402,7 @@ fn row_value(app: &App, row: Row) -> (&'static str, String) {
                 other => other.label().to_owned(),
             },
         ),
+        Row::Difficulty => ("difficulty", app.config.test.difficulty.label().to_owned()),
         Row::Language => ("language", app.config.test.language.clone()),
         Row::CustomText => (
             "custom text",

@@ -286,8 +286,11 @@ fn render_submit(area: Rect, app: &App, theme: Theme, frame: &mut Frame) {
 }
 
 fn render_footer(area: Rect, theme: Theme, frame: &mut Frame) {
+    // `esc` is the command line, not a back key — the same binding the site has
+    // when `quickRestart` is off, which is the default. The way *out* of this
+    // screen is a command, so the footer says where the commands are.
     let line = Line::from(Span::styled(
-        " ctrl+r again · esc back · ctrl+c quit ",
+        " ctrl+r again · esc commands · ctrl+c quit ",
         theme.chrome(),
     ))
     .alignment(Alignment::Center);
