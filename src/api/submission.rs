@@ -133,7 +133,9 @@ pub struct CompletedEvent {
     pub restart_count: u32,
     pub uid: String,
     pub tags: Vec<String>,
-    pub bailed_out: String,
+    /// Whether the typist gave up. A bool, despite the older `BailedOutSchema`
+    /// having been a string: the current schema is `z.boolean().optional()`.
+    pub bailed_out: bool,
     pub blind_mode: bool,
     pub lazy_mode: bool,
     pub funbox: Vec<String>,
@@ -265,7 +267,7 @@ pub fn body_for(result: &TestResult, settings: TestSettings) -> ResultBody {
         restart_count: 0,
         uid: String::new(),
         tags: Vec::new(),
-        bailed_out: "none".to_owned(),
+        bailed_out: false,
         blind_mode: settings.blind,
         lazy_mode: false,
         funbox: Vec::new(),
@@ -923,6 +925,31 @@ mod tests {
                 "{absent} is in the payload but is not a field the schema has"
             );
         }
+    }
+
+    /// A field typed wrongly is a 422 from a `.strict()` schema, and the type is
+    /// not something the tests above can see: `bailedOut` looks like a string in
+    /// every other version of the API.
+    #[test]
+    fn a_mistyped_field_would_not_pass_the_schema() {
+        let result = TestResult {
+            wpm: 100.0,
+            raw_wpm: 100.0,
+            accuracy: 100.0,
+            consistency: 100.0,
+            wpm_consistency: 100.0,
+            inputs: Default::default(),
+            chars: Default::default(),
+            duration_secs: 30.0,
+            chart: Default::default(),
+            keys: Default::default(),
+        };
+        let body = body_for(&result, TestSettings::default());
+        // A bool in the JSON, not a string: `z.boolean().optional()`.
+        assert!(
+            !body.result.bailed_out,
+            "bailedOut is a bool in the current schema"
+        );
     }
 
     /// The honest part: a terminal client has nowhere to send a result, and says
