@@ -6,8 +6,8 @@
 //!
 //! Two counters are maintained, and they are not the same thing:
 //!
-//! - [`Inputs`] counts **keystrokes** — one per character pressed, correct or
-//!   not. This is the accuracy the website shows.
+//! - [`crate::stats::Inputs`] counts **keystrokes** — one per character pressed,
+//!   correct or not. This is the accuracy the website shows.
 //! - [`CharCounts`] is computed **after the fact** from each word's final
 //!   input, so backspaces are already applied. This is what feeds `charStats`.
 //!
@@ -18,7 +18,7 @@ pub mod word;
 
 pub use word::{Word, WordState};
 
-use crate::stats::CharCounts;
+use crate::stats::{CharCounts, Inputs};
 
 /// How long the test lasts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,37 +60,6 @@ pub enum Keystroke {
     Skipped,
     /// The test was already over, so nothing happened.
     Ignored,
-}
-
-/// Per-keystroke accuracy, counted exactly as the website counts it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Inputs {
-    pub correct: u32,
-    pub incorrect: u32,
-}
-
-impl Inputs {
-    fn record(&mut self, correct: bool) {
-        if correct {
-            self.correct += 1;
-        } else {
-            self.incorrect += 1;
-        }
-    }
-
-    /// Characters pressed, right and wrong.
-    pub fn total(&self) -> u32 {
-        self.correct + self.incorrect
-    }
-
-    /// Accuracy as a percentage. No keystrokes means `0`, not `NaN`.
-    pub fn accuracy(&self) -> f64 {
-        let total = self.total();
-        if total == 0 {
-            return 0.0;
-        }
-        f64::from(self.correct) / f64::from(total) * 100.0
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

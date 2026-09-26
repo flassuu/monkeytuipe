@@ -9,9 +9,16 @@
 pub mod chars;
 pub mod chart;
 pub mod event_log;
+pub mod keys;
 pub mod numbers;
+pub mod replay;
+pub mod result;
 
 pub use chars::{count_chars, CharCounts};
+
 pub use chart::{build as build_chart, Chart, ChartContext};
 pub use event_log::{Event, EventLog, TimedEvent};
+pub use keys::{key_spacing, Inputs, KeyStats, KeyUse};
 pub use numbers::{calculate_wpm, consistency, js_round, kogasa, mean, round_to2, std_dev};
+pub use replay::Replay;
+pub use result::{score as score_test, TestResult};

@@ -16,16 +16,16 @@
 //!   little red ticks under the burst line rather than an axis of its own.
 //!
 //! The cumulative series needs the *word* view of the test, not just the
-//! keystroke view: `correct_word` comes from [`count_chars`] over each word's
+//! keystroke view: `correct_word` comes from `count_chars` over each word's
 //! reconstructed input, exactly as the website's `countCharsForWordIndex` does.
-//! That is why this module replays the log instead of reading a running total.
+//! That is why this module replays the log through [`Replay`] instead of reading
+//! a running total.
 
-use std::collections::BTreeMap;
 use std::ops::Range;
 
-use super::chars::count_chars;
 use super::event_log::{Event, EventLog};
 use super::numbers::{calculate_wpm, js_round, round_to2};
+use super::replay::Replay;
 
 /// The longest chart worth building, in seconds.
 ///
@@ -155,7 +155,7 @@ pub struct ChartContext<'a> {
 pub fn build(log: &EventLog, ctx: &ChartContext<'_>) -> Chart {
     let boundaries = boundaries(ctx.end_ms, ctx.is_timed);
     let events = log.events();
-    let mut replay = Replay::new(ctx);
+    let mut replay = Replay::new(ctx.targets, ctx.is_timed);
     let mut chart = Chart::with_capacity(boundaries.len());
 
     // A single cursor walks the log once. The events it consumes inside a
@@ -215,77 +215,6 @@ fn boundaries(end_ms: f64, is_timed: bool) -> Vec<f64> {
         out.push(end_ms);
     }
     out
-}
-
-/// Replays an [`EventLog`] far enough to score the test as it stood at any one
-/// moment.
-struct Replay<'a> {
-    /// What has been entered in each word, reconstructed from insert/delete.
-    inputs: BTreeMap<usize, String>,
-    /// The word the typist is in, which is the one allowed to be half-typed.
-    active: usize,
-    targets: &'a [String],
-    /// Whether a half-typed word counts — true only on a clock.
-    credit_partial: bool,
-}
-
-impl<'a> Replay<'a> {
-    fn new(ctx: &'a ChartContext<'_>) -> Self {
-        Self {
-            inputs: BTreeMap::new(),
-            active: 0,
-            targets: ctx.targets,
-            credit_partial: ctx.is_timed,
-        }
-    }
-
-    fn apply(&mut self, event: Event) {
-        let word = event.word();
-        match event {
-            Event::Insert { ch, .. } => {
-                self.inputs.entry(word).or_default().push(ch);
-                self.active = if ch == ' ' || ch == '\n' {
-                    word + 1
-                } else {
-                    word
-                };
-            }
-            Event::Delete { .. } => {
-                if let Some(input) = self.inputs.get_mut(&word) {
-                    input.pop();
-                }
-                self.active = word;
-            }
-            Event::Skip { .. } => {
-                self.inputs.insert(word, String::new());
-                self.active = word + 1;
-            }
-        }
-    }
-
-    /// `correct_word` for one word, as it stands right now.
-    fn word_counts(&self, word: usize) -> u32 {
-        let input = self.inputs.get(&word).map(String::as_str).unwrap_or("");
-        // A word with no target in the list cannot be scored; treat what was
-        // typed as the target, which is what the website does when the word is
-        // missing from `targetWords`.
-        let target = self.targets.get(word).map(String::as_str).unwrap_or(input);
-        let credit = self.credit_partial && word == self.active;
-        count_chars(input, target, credit).correct_word
-    }
-
-    /// The cumulative `correct_word` the wpm series divides by time.
-    ///
-    /// Words *after* the active one are excluded, which is what the website's
-    /// `break` on the active word does: once you backspace across a commit, the
-    /// word you left behind is no longer part of the score.
-    fn correct_word(&self) -> u32 {
-        self.inputs
-            .iter()
-            .filter(|(word, input)| **word <= self.active && !input.is_empty())
-            .map(|(word, _)| self.word_counts(*word))
-            .sum()
-    }
 }
 
 #[cfg(test)]
