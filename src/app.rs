@@ -577,7 +577,13 @@ impl App {
             }
             Field::Punctuation => test.punctuation = !test.punctuation,
             Field::Numbers => test.numbers = !test.numbers,
-            Field::Blind => test.blind = !test.blind,
+            // Blind mode only changes what is *drawn*, not the words, so
+            // rebuilding the test here would throw away a word list for nothing.
+            Field::Blind => {
+                test.blind = !test.blind;
+                self.dirty = true;
+                return;
+            }
             Field::Difficulty => {
                 let current = bar::DIFFICULTIES.iter().position(|d| *d == test.difficulty);
                 test.difficulty = bar::DIFFICULTIES[step(current, by, bar::DIFFICULTIES.len())];
@@ -651,6 +657,16 @@ impl App {
     pub fn current_char(&self) -> Option<char> {
         let word = self.test.active_word();
         word.char_at(word.input_len_utf16())
+    }
+
+    /// Whether the word pane hides the words that are not being typed.
+    ///
+    /// The website's "blind mode": only the current word is shown, so the test is
+    /// on reading ahead rather than on recall. It is a setting with no engine
+    /// effect — the words are all there, they are just not drawn — so it belongs
+    /// to the screen rather than to the test.
+    pub fn is_blind(&self) -> bool {
+        self.config.test.blind
     }
 
     /// The display width of every word, for laying the word pane out.
@@ -2230,6 +2246,50 @@ mod tests {
             .collect();
         assert_eq!(app.test().words().len(), 50, "the new length took effect");
         assert_ne!(before, after, "and it is a different set of words");
+    }
+
+    /// A field that changes only what is drawn must not throw the words away.
+    /// Rebuilding for every field is right for punctuation and difficulty and
+    /// wrong for blind, and the difference is a word list disappearing.
+    #[test]
+    fn a_field_that_only_affects_the_drawing_keeps_the_words() {
+        let mut app = app_with_test(crate::config::Mode::Words);
+        app.set_words(
+            "alpha bravo charlie"
+                .split(' ')
+                .map(str::to_owned)
+                .collect(),
+        );
+        let before: Vec<String> = app
+            .test()
+            .words()
+            .iter()
+            .map(|w| w.text().to_owned())
+            .collect();
+
+        app.change_bar_field(Field::Blind, 1);
+        let after: Vec<String> = app
+            .test()
+            .words()
+            .iter()
+            .map(|w| w.text().to_owned())
+            .collect();
+        assert_eq!(before, after, "blind mode threw the word list away");
+        assert!(app.is_blind());
+    }
+
+    /// Punctuation *does* change the words, so it must rebuild.
+    #[test]
+    fn a_field_that_changes_the_words_rebuilds_them() {
+        let mut app = app_with_test(crate::config::Mode::Words);
+        app.set_words(vec!["word".to_owned()]);
+        assert_eq!(app.test().words().len(), 1);
+        app.change_bar_field(Field::Length, 1);
+        assert_eq!(
+            app.test().words().len(),
+            50,
+            "the new length was not applied"
+        );
     }
 
     #[test]

@@ -514,3 +514,53 @@ fn the_results_screen_survives_a_tiny_terminal() {
         let _ = render(&finished_app(12), width, height);
     }
 }
+
+/// Blind mode shows only the word being typed, so the test is about reading ahead
+/// rather than recall. A setting that does nothing on screen is worse than no
+/// setting at all, so this checks it actually hides the words.
+#[test]
+fn blind_mode_shows_only_the_active_word() {
+    let mut app = app();
+    app.set_words(
+        "alpha bravo charlie delta echo"
+            .split(' ')
+            .map(str::to_owned)
+            .collect(),
+    );
+    let buffer = render(&app, 60, 20);
+    let whole = area_text(&buffer, layout_of(&app, &buffer).words);
+    assert!(
+        whole.contains("alpha") && whole.contains("echo"),
+        "{whole:?}"
+    );
+
+    // Turn it on through the bar, the way the user would: walk the selection to
+    // the end and come back until the field is found. Bounded, so a bar that
+    // never offers the field fails the test instead of hanging it.
+    app.move_bar_selection(100);
+    let mut steps = 0;
+    while app.bar_field() != monkeytuipe::config::Field::Blind && steps < 32 {
+        app.move_bar_selection(-1);
+        steps += 1;
+    }
+    assert_eq!(
+        app.bar_field(),
+        monkeytuipe::config::Field::Blind,
+        "no blind field"
+    );
+    app.change_bar_field(app.bar_field(), 1);
+    assert!(app.is_blind());
+
+    let buffer = render(&app, 60, 20);
+    let blind = area_text(&buffer, layout_of(&app, &buffer).words);
+    assert!(
+        blind.contains("alpha"),
+        "the active word is gone: {blind:?}"
+    );
+    for hidden in ["bravo", "charlie", "delta", "echo"] {
+        assert!(
+            !blind.contains(hidden),
+            "{hidden} is still visible in blind mode: {blind:?}"
+        );
+    }
+}

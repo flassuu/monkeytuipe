@@ -247,17 +247,32 @@ fn render_words(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
         return;
     }
 
-    let lines = wrap_words(&app.word_widths(), area.width as usize);
+    // Blind mode shows only the word being typed, so the pane is one word wide
+    // and the wrapping below has nothing to do. The words are all still there —
+    // this is a screen setting, not an engine one.
+    let shown: &[Word] = if app.is_blind() {
+        words
+            .get(app.cursor_word())
+            .map_or(&[][..], std::slice::from_ref)
+    } else {
+        words
+    };
+    if shown.is_empty() {
+        return;
+    }
+    let widths: Vec<usize> = shown.iter().map(|w| w.text().chars().count()).collect();
+
+    let lines = wrap_words(&widths, area.width as usize);
     let height = area.height as usize;
 
     // Scroll so the active word's line is in the middle, and centre the block
     // when there are fewer lines than the pane is tall.
+    // The active word's index within what is being shown, which in blind mode is
+    // the only word there is.
+    let active = app.cursor_word().saturating_sub(first_word(shown, words));
     let active_line = lines
         .iter()
-        .position(|line| {
-            let first = line.first;
-            first <= app.cursor_word() && app.cursor_word() < first + line.count
-        })
+        .position(|line| line.first <= active && active < line.first + line.count)
         .unwrap_or(0);
     let drawn = height.min(lines.len());
     let first_line = active_line.saturating_sub((drawn.saturating_sub(1)) / 2);
@@ -271,11 +286,11 @@ fn render_words(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
         let mut spans: Vec<Span> = Vec::new();
         for offset in 0..line.count {
             let index = line.first + offset;
-            let word = &words[index];
+            let word = &shown[index];
             if offset > 0 {
                 spans.push(Span::raw(" "));
             }
-            if index == app.cursor_word() {
+            if index == active {
                 spans.extend(active_word(word, theme));
             } else {
                 spans.push(Span::styled(
@@ -288,6 +303,19 @@ fn render_words(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
     }
 
     frame.render_widget(Paragraph::new(out).alignment(Alignment::Center), area);
+}
+
+/// Which word of the full list the shown slice starts at.
+///
+/// The pane draws a contiguous run, so the mapping back to the engine's indices
+/// is the run's first index — which is the active word's own index in blind mode.
+fn first_word(shown: &[Word], all: &[Word]) -> usize {
+    if shown.is_empty() || all.is_empty() {
+        return 0;
+    }
+    all.iter()
+        .position(|word| std::ptr::eq(word, &shown[0]))
+        .unwrap_or(0)
 }
 
 /// The style of a word that is no longer being typed.
