@@ -64,6 +64,9 @@ pub enum Action {
     CopyResult,
     /// Show only the word being typed.
     Blind,
+    /// Step the difficulty. The website keeps this in the settings panel rather
+    /// than on the test bar, so a command is the quick way in.
+    Difficulty(i8),
 }
 
 /// The commands, in the order the list shows them.
@@ -137,6 +140,16 @@ pub const COMMANDS: &[Command] = &[
         display: "quote length",
         aliases: &["quotes", "thicc", "short", "medium", "long"],
         action: Action::SetLength(Field::WordsCustom),
+    },
+    Command {
+        display: "harder",
+        aliases: &["difficulty", "easier"],
+        action: Action::Difficulty(1),
+    },
+    Command {
+        display: "easier",
+        aliases: &["difficulty", "slower"],
+        action: Action::Difficulty(-1),
     },
     Command {
         display: "blind mode",
@@ -477,6 +490,23 @@ mod tests {
                 "{mode:?} is not in the command list"
             );
         }
+    }
+
+    /// Difficulty is not on the site's test bar, so the command list is the quick
+    /// way to it. Both directions have to exist or "harder" is the only way to
+    /// change it.
+    #[test]
+    fn difficulty_is_reachable_in_both_directions() {
+        let harder = COMMANDS
+            .iter()
+            .find(|c| c.display == "harder")
+            .expect("a harder command");
+        let easier = COMMANDS
+            .iter()
+            .find(|c| c.display == "easier")
+            .expect("an easier command");
+        assert_eq!(harder.action, Action::Difficulty(1));
+        assert_eq!(easier.action, Action::Difficulty(-1));
     }
 
     #[test]

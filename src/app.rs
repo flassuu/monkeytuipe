@@ -745,6 +745,9 @@ impl App {
                 self.config.test.blind = !self.config.test.blind;
                 self.dirty = true;
             }
+            Cmd::Difficulty(by) => {
+                self.adjust_by(Row::Difficulty, by);
+            }
             Cmd::Languages => {
                 self.show_screen(ScreenKind::Settings);
             }
@@ -1540,6 +1543,14 @@ impl App {
     /// cannot silently become a no-op: adding it here and forgetting it is a
     /// compile error rather than a key that quietly stops working.
     fn adjust(&mut self, row: Row) {
+        self.adjust_by(row, 1)
+    }
+
+    /// As [`Self::adjust`], but in a direction.
+    ///
+    /// A toggle does not care which way it is pressed and a cycle does, so the
+    /// direction is a parameter rather than being baked into the caller's key.
+    fn adjust_by(&mut self, row: Row, by: i8) {
         match row {
             Row::Theme => self.config.theme = self.config.theme.next(),
             Row::Language => {
@@ -1552,13 +1563,23 @@ impl App {
             // The switch is still honoured so an existing config is not ignored —
             // but it cannot make submission work, and the screen says so.
             Row::SubmitResults => self.config.submit_results = !self.config.submit_results,
+            // Difficulty is not on the website's test bar — it is in the settings
+            // panel, which is what this row is — but the command list steps it
+            // directly, because a setting that can only be reached by opening a
+            // screen and walking to a row is a setting most people never change.
+            Row::Difficulty => {
+                let current = bar::DIFFICULTIES
+                    .iter()
+                    .position(|d| *d == self.config.test.difficulty);
+                self.config.test.difficulty =
+                    bar::DIFFICULTIES[bar::step(current, isize::from(by), bar::DIFFICULTIES.len())];
+            }
             // Free text and the bar's own fields. A row that has a view is
             // opened by the screen, not stepped here, and the bar's fields are
             // changed through the bar.
             Row::CustomText
             | Row::ApeKey
             | Row::Mode
-            | Row::Difficulty
             | Row::QuoteLength
             | Row::Blind
             | Row::Back => return,
@@ -1568,7 +1589,7 @@ impl App {
         // is rebuilt to show the effect before it is typed.
         if matches!(
             row,
-            Row::Punctuation | Row::Numbers | Row::Theme | Row::Language
+            Row::Punctuation | Row::Numbers | Row::Theme | Row::Language | Row::Difficulty
         ) {
             self.regenerate();
         }
@@ -3022,6 +3043,67 @@ mod tests {
                 .and_then(|w| w.selected())
                 .map(|m| m.command),
             Some(1)
+        );
+    }
+
+    /// Difficulty is not on the website's test bar, so a setting that lived only
+    /// there would have become unreachable when the bar was rebuilt. It is on the
+    /// settings screen and in the command list, and both have to work.
+    #[test]
+    fn difficulty_is_reachable_and_cycles_in_both_directions() {
+        use crate::config::Difficulty;
+        let before = app().config.test.difficulty;
+
+        let index = crate::screens::commands::filter("harder")
+            .first()
+            .map(|m| m.command)
+            .expect("a harder command");
+        let mut app = app();
+        app.run_command(index);
+        assert_ne!(app.config.test.difficulty, before, "harder did nothing");
+        let harder = app.config.test.difficulty;
+
+        let index = crate::screens::commands::filter("easier")
+            .first()
+            .map(|m| m.command)
+            .expect("an easier command");
+        app.run_command(index);
+        assert_eq!(app.config.test.difficulty, before, "easier did not undo it");
+        assert_ne!(harder, Difficulty::Normal, "the premise is that it moved");
+    }
+
+    /// And it comes back round, like every other cycle in the app.
+    #[test]
+    fn difficulty_comes_back_round() {
+        let mut app = app();
+        let before = app.config.test.difficulty;
+        for _ in 0..bar::DIFFICULTIES.len() {
+            app.adjust_by(Row::Difficulty, 1);
+        }
+        assert_eq!(app.config.test.difficulty, before);
+    }
+
+    /// A difficulty change rebuilds the words, or the bar would say one difficulty
+    /// and the test would be another.
+    #[test]
+    fn a_difficulty_change_rebuilds_the_test() {
+        let mut app = app();
+        let before: Vec<String> = app
+            .test()
+            .words()
+            .iter()
+            .map(|w| w.text().to_owned())
+            .collect();
+        app.adjust_by(Row::Difficulty, 1);
+        let after: Vec<String> = app
+            .test()
+            .words()
+            .iter()
+            .map(|w| w.text().to_owned())
+            .collect();
+        assert_ne!(
+            before, after,
+            "the words did not change with the difficulty"
         );
     }
 

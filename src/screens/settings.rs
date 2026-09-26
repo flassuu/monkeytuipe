@@ -36,8 +36,9 @@ use crate::screens::{Effect, Row, Screen, ScreenKind};
 use crate::words::variants;
 
 /// The rows, in display order. `Back` is last so `↑` from the top reaches it.
-pub const ROWS: [Row; 6] = [
+pub const ROWS: [Row; 7] = [
     Row::Theme,
+    Row::Difficulty,
     Row::Language,
     Row::CustomText,
     Row::ApeKey,
@@ -538,12 +539,16 @@ fn hint(theme: &crate::config::theme::Theme, text: &str) -> Line<'static> {
 /// Not dead: the test on it is the thing that keeps a duplicate from being
 /// added back, and a duplicate is how a setting ends up showing one value and
 /// applying another.
+///
+/// `Difficulty` is deliberately *not* in this list, and that is the site's
+/// arrangement rather than an oversight: the test-screen bar has punctuation,
+/// numbers, the mode and the length, and difficulty lives in the settings panel
+/// — here, on this screen.
 #[cfg(test)]
-const NOT_HERE: [Row; 6] = [
+const NOT_HERE: [Row; 5] = [
     Row::Punctuation,
     Row::Numbers,
     Row::Mode,
-    Row::Difficulty,
     Row::QuoteLength,
     Row::Blind,
 ];
@@ -634,12 +639,20 @@ mod tests {
         assert!(effects.is_empty(), "up changed something: {effects:?}");
     }
 
+    /// The second row by position rather than by name, because that is what a
+    /// single `down` reaches — and the row *is* difficulty, which is where the
+    /// website keeps it.
     #[test]
     fn down_from_the_top_moves_to_the_second_row() {
         let mut app = app();
         let mut settings = Settings::default();
         press_on(&mut app, &mut settings, &[Action::Down]);
-        assert_eq!(settings.selected_row(), Some(Row::Language));
+        assert_eq!(settings.selected_row(), Some(ROWS[1]));
+        assert_eq!(
+            settings.selected_row(),
+            Some(Row::Difficulty),
+            "difficulty should be the second row"
+        );
     }
 
     #[test]
@@ -659,7 +672,8 @@ mod tests {
     fn the_language_row_opens_a_browser_rather_than_stepping() {
         let mut app = app();
         let mut settings = Settings::default();
-        press_on(&mut app, &mut settings, &[Action::Down, Action::Right]);
+        walk_to(&mut app, &mut settings, Row::Language);
+        press_on(&mut app, &mut settings, &[Action::Right]);
         assert!(
             matches!(settings.view(), View::Languages { .. }),
             "{:?}",
@@ -669,8 +683,9 @@ mod tests {
 
     #[test]
     fn the_browser_chooses_a_language_and_closes() {
+        let mut app = app();
         let mut settings = Settings::default();
-        settings.handle(Action::Down); // language
+        walk_to(&mut app, &mut settings, Row::Language);
         settings.handle(Action::Select);
         assert!(matches!(settings.view(), View::Languages { .. }));
         settings.handle(Action::Down); // the second base
@@ -686,7 +701,8 @@ mod tests {
     fn the_browser_never_escapes_its_lists() {
         let mut app = app();
         let mut settings = Settings::default();
-        press_on(&mut app, &mut settings, &[Action::Down, Action::Select]);
+        walk_to(&mut app, &mut settings, Row::Language);
+        press_on(&mut app, &mut settings, &[Action::Select]);
         for _ in 0..200 {
             press_on(&mut app, &mut settings, &[Action::Up, Action::Right]);
         }
@@ -702,7 +718,10 @@ mod tests {
     fn escape_leaves_the_browser_without_choosing() {
         let mut app = app();
         let mut settings = Settings::default();
-        press_on(&mut app, &mut settings, &[Action::Down, Action::Select]);
+        // Opening a view is a walk to its row and a select, not a fixed number of
+        // downs, so a new row above it does not quietly open the wrong thing.
+        walk_to(&mut app, &mut settings, Row::Language);
+        press_on(&mut app, &mut settings, &[Action::Select]);
         let effects = press_on(&mut app, &mut settings, &[Action::Back]);
         assert!(effects.is_empty(), "{effects:?}");
         assert_eq!(settings.view(), &View::Rows);
@@ -714,11 +733,8 @@ mod tests {
     fn typing_in_an_editor_fills_it() {
         let mut app = app();
         let mut settings = Settings::default();
-        press_on(
-            &mut app,
-            &mut settings,
-            &[Action::Down, Action::Down, Action::Select],
-        );
+        walk_to(&mut app, &mut settings, Row::CustomText);
+        press_on(&mut app, &mut settings, &[Action::Select]);
         for c in "hello".chars() {
             press_on(&mut app, &mut settings, &[Action::Char(c)]);
         }
@@ -729,15 +745,36 @@ mod tests {
         assert_eq!(text, "hello");
     }
 
+    /// Walks the selection to `row`.
+    ///
+    /// Counting downs breaks every time a row is added above, and the failure
+    /// then looks like a bug in whatever the test was about. Walking by name is
+    /// what a user does and it survives a new row. Bounded by the row count, so a
+    /// row that cannot be reached fails the test instead of hanging it.
+    fn walk_to(app: &mut App, settings: &mut Settings, row: Row) {
+        for _ in 0..ROWS.len() {
+            if settings.selected_row() == Some(row) {
+                return;
+            }
+            press_on(app, settings, &[Action::Down]);
+        }
+        panic!(
+            "could not walk to {row:?}; stopped on {:?}",
+            settings.selected_row()
+        );
+    }
+
+    /// Opens the editor on `row`.
+    fn open_editor(app: &mut App, settings: &mut Settings, row: Row) {
+        walk_to(app, settings, row);
+        press_on(app, settings, &[Action::Select]);
+    }
+
     #[test]
     fn backspace_in_an_editor_removes_one_character() {
         let mut app = app();
         let mut settings = Settings::default();
-        press_on(
-            &mut app,
-            &mut settings,
-            &[Action::Down, Action::Down, Action::Select],
-        );
+        open_editor(&mut app, &mut settings, Row::CustomText);
         for c in "hi!".chars() {
             press_on(&mut app, &mut settings, &[Action::Char(c)]);
         }
@@ -752,11 +789,7 @@ mod tests {
     fn an_editor_saves_on_enter_and_discards_on_escape() {
         let mut app = app();
         let mut settings = Settings::default();
-        press_on(
-            &mut app,
-            &mut settings,
-            &[Action::Down, Action::Down, Action::Select],
-        );
+        open_editor(&mut app, &mut settings, Row::CustomText);
         for c in "kept".chars() {
             press_on(&mut app, &mut settings, &[Action::Char(c)]);
         }
@@ -764,7 +797,7 @@ mod tests {
         assert_eq!(effects, vec![Effect::SetCustomText("kept".to_owned())]);
         assert_eq!(settings.view(), &View::Rows);
 
-        press_on(&mut app, &mut settings, &[Action::Down, Action::Select]);
+        open_editor(&mut app, &mut settings, Row::CustomText);
         for c in "thrown away".chars() {
             press_on(&mut app, &mut settings, &[Action::Char(c)]);
         }
@@ -779,11 +812,7 @@ mod tests {
     fn a_bound_letter_is_still_text_in_an_editor() {
         let mut app = app();
         let mut settings = Settings::default();
-        press_on(
-            &mut app,
-            &mut settings,
-            &[Action::Down, Action::Down, Action::Select],
-        );
+        open_editor(&mut app, &mut settings, Row::CustomText);
         for c in "a short passage".chars() {
             press_on(&mut app, &mut settings, &[Action::Char(c)]);
         }
@@ -800,7 +829,7 @@ mod tests {
         let mut app = app();
         let mut settings = Settings::default();
         assert!(!settings.wants_text());
-        press_on(&mut app, &mut settings, &[Action::Down]);
+        walk_to(&mut app, &mut settings, Row::Language);
         assert_eq!(settings.selected_row(), Some(Row::Language));
     }
 
@@ -810,11 +839,8 @@ mod tests {
     fn an_editor_will_not_grow_without_bound() {
         let mut app = app();
         let mut settings = Settings::default();
-        press_on(
-            &mut app,
-            &mut settings,
-            &[Action::Down, Action::Down, Action::Select],
-        );
+        walk_to(&mut app, &mut settings, Row::CustomText);
+        press_on(&mut app, &mut settings, &[Action::Select]);
         for _ in 0..(max_len(Row::CustomText) + 100) {
             press_on(&mut app, &mut settings, &[Action::Char('x')]);
         }
@@ -832,13 +858,7 @@ mod tests {
         let mut settings = Settings::default();
         // Walk down to the row rather than assigning, so the test breaks if the
         // row moves.
-        for _ in 0..ROWS.len() {
-            if settings.selected_row() == Some(Row::SubmitResults) {
-                break;
-            }
-            press_on(&mut app, &mut settings, &[Action::Down]);
-        }
-        assert_eq!(settings.selected_row(), Some(Row::SubmitResults));
+        walk_to(&mut app, &mut settings, Row::SubmitResults);
         let effects = press_on(&mut app, &mut settings, &[Action::Select]);
         let Effect::ShowMessage(message) = effects.first().expect("a message") else {
             panic!("{effects:?}");
@@ -871,7 +891,8 @@ mod tests {
     fn the_browser_shows_the_size_grid_and_the_current_language() {
         let mut app = app();
         let mut settings = Settings::default();
-        press_on(&mut app, &mut settings, &[Action::Down, Action::Select]);
+        walk_to(&mut app, &mut settings, Row::Language);
+        press_on(&mut app, &mut settings, &[Action::Select]);
         let text = draw(&settings, &app, 90, 46);
         assert!(text.contains("base"), "no size header: {text}");
         assert!(text.contains("1k"), "no 1k column: {text}");
@@ -886,11 +907,8 @@ mod tests {
     fn the_editor_shows_what_it_is_editing() {
         let mut app = app();
         let mut settings = Settings::default();
-        press_on(
-            &mut app,
-            &mut settings,
-            &[Action::Down, Action::Down, Action::Select],
-        );
+        walk_to(&mut app, &mut settings, Row::CustomText);
+        press_on(&mut app, &mut settings, &[Action::Select]);
         for c in "a passage".chars() {
             press_on(&mut app, &mut settings, &[Action::Char(c)]);
         }
@@ -905,9 +923,13 @@ mod tests {
         for (width, height) in [(1u16, 1u16), (4, 3), (10, 5), (20, 8), (200, 60)] {
             let mut app = app();
             let mut settings = Settings::default();
-            for _ in 0..3 {
-                press_on(&mut app, &mut settings, &[Action::Down, Action::Select]);
+            // Every row, opened, at every size. Three rows would have missed
+            // whatever the fourth one does.
+            for row in ROWS {
+                walk_to(&mut app, &mut settings, row);
+                press_on(&mut app, &mut settings, &[Action::Select]);
                 let _ = draw(&settings, &app, width, height);
+                let _ = press_on(&mut app, &mut settings, &[Action::Back]);
             }
             let _ = draw(&settings, &app, width, height);
         }
