@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let config = Config::load(&config_path)?;
+    let config = Config::load_migrating(&config_path)?;
     let ape_key = config.resolved_ape_key();
 
     // The env var wins over the file, so resolve it before the client is built.

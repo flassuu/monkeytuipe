@@ -238,10 +238,26 @@ impl App {
     /// The ticker is the only source of time, so the countdown and the timeout
     /// never depend on when a keystroke happened to arrive.
     pub fn tick(&mut self) {
+        if self.test.is_finished() {
+            self.freeze_clock();
+            return;
+        }
         if let Some(anchor) = self.anchor {
             self.elapsed = anchor.elapsed();
         }
         self.check_timeout();
+    }
+
+    /// Stops the clock where the test ended.
+    ///
+    /// The engine is the only thing that knows a test is over, and the clock is
+    /// the only thing that can keep it honest. Left running, `elapsed` would go
+    /// on growing after the last keystroke and the final wpm would quietly decay
+    /// for as long as the screen stayed up — a result that changes while you look
+    /// at it. Dropping the anchor is enough: `set_elapsed` stays free to drive
+    /// the clock by hand.
+    fn freeze_clock(&mut self) {
+        self.anchor = None;
     }
 
     fn check_timeout(&mut self) {
@@ -250,12 +266,19 @@ impl App {
         }
         if self.elapsed_secs() >= f64::from(self.test.mode2()) {
             self.test.finish();
+            self.freeze_clock();
         }
     }
 
     /// Feeds a typed character to the engine, starting the clock on the first.
     pub fn type_char(&mut self, c: char) {
-        if !self.test.is_started() {
+        if self.test.is_started() {
+            if self.test.is_finished() {
+                // Input after the end is dropped by the engine; refreshing the
+                // anchor here would restart the clock behind a frozen result.
+                return;
+            }
+        } else {
             self.anchor = Some(Instant::now());
         }
         self.test.input(c);
@@ -504,7 +527,6 @@ mod tests {
             state: KeyEventState::NONE,
         }
     }
-
     fn press_mod(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent {
             code,
@@ -926,5 +948,54 @@ mod tests {
         for (_, keys) in keybinds.all() {
             assert!(!keys.is_empty(), "a binding must have at least one key");
         }
+    }
+
+    /// A result you are looking at must not change under you.
+    ///
+    /// Before the clock was frozen, the wall clock kept feeding `elapsed` after
+    /// `finish()`, so the wpm on a finished test decayed for as long as the
+    /// screen stayed up.
+    #[test]
+    fn the_clock_stops_when_the_test_ends() {
+        let mut app = app();
+        let test = Test::new(vec!["a".into(); 200], Mode::Time, 5);
+        app.test = test;
+
+        app.type_char('a');
+        app.set_elapsed(Duration::from_secs_f64(5.0));
+        app.tick();
+        assert!(app.test().is_finished(), "the time was up");
+        let wpm_at_the_end = app.wpm();
+        let elapsed_at_the_end = app.elapsed_secs();
+
+        // A wall-clock advance and a burst of input must both change nothing.
+        std::thread::sleep(Duration::from_millis(30));
+        for _ in 0..5 {
+            app.tick();
+        }
+        app.type_char('a');
+        app.type_char('b');
+        app.test.skip();
+
+        assert_eq!(app.elapsed_secs(), elapsed_at_the_end, "the clock moved on");
+        assert_eq!(app.wpm(), wpm_at_the_end, "the result moved on");
+        assert!(app.wpm() > 0.0, "a finished test has a result to show");
+    }
+
+    #[test]
+    fn input_after_the_end_does_not_restart_the_clock() {
+        let mut app = app();
+        app.test = Test::new(vec!["a".into(); 200], Mode::Words, 200);
+        for _ in 0..200 {
+            app.type_char('a');
+            app.type_char(' ');
+        }
+        assert!(app.test().is_finished());
+        let frozen = app.elapsed_secs();
+
+        std::thread::sleep(Duration::from_millis(20));
+        app.type_char('a');
+        app.tick();
+        assert_eq!(app.elapsed_secs(), frozen);
     }
 }

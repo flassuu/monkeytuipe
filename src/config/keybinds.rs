@@ -59,6 +59,69 @@ impl Default for Keybinds {
     }
 }
 
+/// The bindings shipped before the "a bare letter is untypeable" rule existed.
+///
+/// A config file written by an older build carries these verbatim, which means
+/// it silently shadows every later change to the defaults. [`Keybinds::migrate`]
+/// looks for exactly this table.
+pub fn legacy_v0() -> Keybinds {
+    Keybinds {
+        quit: vec!["q".into(), "ctrl+c".into()],
+        up: vec!["up".into(), "k".into()],
+        down: vec!["down".into(), "j".into()],
+        left: vec!["left".into(), "h".into()],
+        right: vec!["right".into(), "l".into()],
+        select: vec!["space".into()],
+        back: vec!["esc".into(), "enter".into()],
+        settings: vec![",".into()],
+        start_test: vec!["t".into()],
+        restart: vec!["r".into()],
+    }
+}
+
+impl Keybinds {
+    /// Upgrades the pre-1.0 defaults to the current ones.
+    ///
+    /// Only a group that still matches the old default *exactly* is replaced, so
+    /// an edit the user made survives. The unavoidable cost is a config that was
+    /// never touched but happens to say `restart = ["r"]`: that is
+    /// indistinguishable from having asked for it, and is treated as asked for.
+    pub fn migrate(&mut self) {
+        let legacy = legacy_v0();
+        let current = Keybinds::default();
+        if self.quit == legacy.quit {
+            self.quit = current.quit;
+        }
+        if self.up == legacy.up {
+            self.up = current.up;
+        }
+        if self.down == legacy.down {
+            self.down = current.down;
+        }
+        if self.left == legacy.left {
+            self.left = current.left;
+        }
+        if self.right == legacy.right {
+            self.right = current.right;
+        }
+        if self.select == legacy.select {
+            self.select = current.select;
+        }
+        if self.back == legacy.back {
+            self.back = current.back;
+        }
+        if self.settings == legacy.settings {
+            self.settings = current.settings;
+        }
+        if self.start_test == legacy.start_test {
+            self.start_test = current.start_test;
+        }
+        if self.restart == legacy.restart {
+            self.restart = current.restart;
+        }
+    }
+}
+
 impl Keybinds {
     /// All bindings, paired with the action they trigger.
     pub fn all(&self) -> Vec<(Action, &Vec<String>)> {
@@ -136,5 +199,31 @@ mod tests {
         ] {
             assert!(actions.contains(&action), "{action:?} is unreachable");
         }
+    }
+
+    #[test]
+    fn migration_replaces_the_untypeable_legacy_defaults() {
+        let mut keybinds = legacy_v0();
+        keybinds.migrate();
+        assert_eq!(keybinds, Keybinds::default());
+    }
+
+    #[test]
+    fn migration_keeps_a_binding_the_user_actually_chose() {
+        let mut keybinds = legacy_v0();
+        keybinds.restart = vec!["ctrl+y".into()];
+        keybinds.migrate();
+        assert_eq!(keybinds.restart, vec!["ctrl+y".to_string()]);
+        // the untouched groups still move
+        assert_eq!(keybinds.settings, vec!["f2".to_string()]);
+    }
+
+    #[test]
+    fn migrating_twice_changes_nothing() {
+        let mut keybinds = legacy_v0();
+        keybinds.migrate();
+        let once = keybinds.clone();
+        keybinds.migrate();
+        assert_eq!(keybinds, once);
     }
 }
