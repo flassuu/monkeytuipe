@@ -12,8 +12,10 @@ use crate::config::theme::Theme;
 use crate::config::Config;
 use crate::engine::{Mode, Test};
 use crate::screens::{Effect, Row, Screen, ScreenKind, ScreenState};
+use crate::stats::result::{score as score_test, Scoring};
 use crate::stats::{
     build_chart, calculate_wpm, CharCounts, Chart, ChartContext, Event as LogEvent, EventLog,
+    TestResult,
 };
 use crate::terminal::Tui;
 use crate::words::language::{self, Language};
@@ -78,6 +80,8 @@ pub struct App {
     config_path: PathBuf,
     /// Set when the config no longer matches what is on disk.
     dirty: bool,
+    /// Whether the results screen has already been shown for this test.
+    results_shown: bool,
 }
 
 impl App {
@@ -100,6 +104,7 @@ impl App {
             manual_clock: false,
             config_path,
             dirty: false,
+            results_shown: false,
         };
         app.start_language(app.config.test.language.clone());
         app
@@ -188,6 +193,7 @@ impl App {
         self.test = Test::new(words, self.test_mode(), self.test_length());
         self.reset_clock();
         self.log.clear();
+        self.results_shown = false;
     }
 
     /// How long the test is, read from the config rather than from the test that
@@ -306,7 +312,7 @@ impl App {
     /// there is no way for the chart and the engine to disagree: they are
     /// computed from the same record, and the log is the only input.
     pub fn chart(&self) -> Chart {
-        let targets: Vec<String> = self.test.words().iter().map(|w| w.target()).collect();
+        let targets = self.targets();
         build_chart(
             &self.log,
             &ChartContext {
@@ -315,6 +321,30 @@ impl App {
                 end_ms: self.now_ms(),
             },
         )
+    }
+
+    /// The finished test, scored. `None` until one has been run.
+    ///
+    /// A pure function of the log, so it is recomputed on demand: there is no
+    /// snapshot to keep in step with the engine, and a test that is still
+    /// running scores to whatever it has done so far rather than not at all.
+    pub fn result(&self) -> Option<TestResult> {
+        if !self.test.is_started() {
+            return None;
+        }
+        Some(score_test(Scoring {
+            log: &self.log,
+            targets: &self.targets(),
+            is_timed: self.test.mode().is_timed(self.test.mode2()),
+            duration_secs: self.elapsed_secs(),
+            chars: self.test.chars(),
+            inputs: self.test.inputs(),
+        }))
+    }
+
+    /// Every target word, each including the character that ends it.
+    fn targets(&self) -> Vec<String> {
+        self.test.words().iter().map(|word| word.target()).collect()
     }
 
     /// The countdown for the status line.
@@ -340,6 +370,21 @@ impl App {
     /// The screen currently on display.
     pub fn screen_kind(&self) -> ScreenKind {
         self.screen.kind()
+    }
+
+    /// Feeds one key through the real key path, as the event loop would.
+    ///
+    /// The event loop is the only caller in production; this exists so a test can
+    /// check that a screen really drops a key rather than only that its `handle`
+    /// returns nothing.
+    pub fn press(&mut self, code: KeyCode) -> bool {
+        self.on_key(KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        })
+        .unwrap_or(false)
     }
 
     /// The settings row currently highlighted, for tests and later UI.
@@ -368,6 +413,7 @@ impl App {
         self.test = Test::new(words, self.test_mode(), self.test_length());
         self.reset_clock();
         self.log.clear();
+        self.results_shown = false;
     }
 
     /// Moves the caret to a word index, clamped to the list.
@@ -407,16 +453,15 @@ impl App {
     /// never depend on when a keystroke happened to arrive.
     pub fn tick(&mut self) {
         self.drain_languages();
-        if self.test.is_finished() {
-            self.freeze_clock();
-            self.close_log();
-            return;
+        if !self.test.is_finished() {
+            if let Some(anchor) = self.anchor {
+                self.elapsed = anchor.elapsed();
+            }
+            self.check_timeout();
         }
-        if let Some(anchor) = self.anchor {
-            self.elapsed = anchor.elapsed();
-        }
-        self.check_timeout();
-        self.close_log();
+        // Both in one place, so the tick that *ends* the test shows the result
+        // as well as the ones after it.
+        self.settle();
     }
 
     /// Picks up a word list a background fetch has finished with.
@@ -482,7 +527,7 @@ impl App {
                 ch: c,
             },
         );
-        self.close_log();
+        self.settle();
     }
 
     /// Records a backspace against whichever word it actually lands in.
@@ -515,6 +560,41 @@ impl App {
         }
     }
 
+    /// Everything that has to happen once the test may have just ended.
+    ///
+    /// Called from the ticker *and* after every keystroke, because a word-count
+    /// test ends on a keystroke: leaving it to the next tick means a test that
+    /// runs out of words sits on the typing screen showing a finished test, and
+    /// in a headless caller there may not be a next tick at all.
+    fn settle(&mut self) {
+        if !self.test.is_finished() {
+            return;
+        }
+        self.freeze_clock();
+        // The log closes before the result is shown, or the chart stops at the
+        // last keystroke and the test's final second goes missing.
+        self.close_log();
+        self.show_results();
+    }
+
+    /// Moves to the results screen the first time a test ends.
+    ///
+    /// Only from the typing screen, and only once: a finished test stays on its
+    /// result while the user reads it, instead of yanking them back the moment
+    /// the ticker notices the clock ran out again. This is the bug the old
+    /// client had in reverse — a test that ended and left you staring at a
+    /// frozen word list with no score anywhere.
+    fn show_results(&mut self) {
+        if !self.test.is_finished() || self.results_shown {
+            return;
+        }
+        if self.screen.kind() != ScreenKind::Typing {
+            return;
+        }
+        self.results_shown = true;
+        self.apply(Effect::Switch(ScreenKind::Results));
+    }
+
     /// Milliseconds since the first keystroke, which is the origin every event
     /// timestamp and every chart boundary is measured from.
     ///
@@ -539,6 +619,7 @@ impl App {
                 self.screen = match kind {
                     ScreenKind::Typing => ScreenState::Typing(Default::default()),
                     ScreenKind::Settings => ScreenState::Settings(Default::default()),
+                    ScreenKind::Results => ScreenState::Results(Default::default()),
                 };
                 false
             }
@@ -566,7 +647,7 @@ impl App {
                     },
                 );
                 self.test.skip();
-                self.close_log();
+                self.settle();
                 false
             }
             Effect::Adjust(row) => {
@@ -645,6 +726,7 @@ impl App {
         let effects = match &mut self.screen {
             ScreenState::Typing(screen) => screen.handle(action),
             ScreenState::Settings(screen) => screen.handle(action),
+            ScreenState::Results(screen) => screen.handle(action),
         };
 
         let mut quit = false;
@@ -1298,6 +1380,128 @@ mod tests {
         config.test.language = "klingon".to_owned();
         let app = App::new(config, PathBuf::from("/nonexistent/config.toml"));
         assert!(!app.test().words().is_empty());
+    }
+
+    // ---- results --------------------------------------------------------
+
+    /// An app whose 10-second test has just run out.
+    fn finished(seconds: u64) -> App {
+        let mut config = Config::default();
+        config.test.time = 10;
+        let mut app = App::new(config, PathBuf::from("/nonexistent/config.toml"));
+        app.set_words(
+            "the quick brown fox jumps over the lazy dog"
+                .split(' ')
+                .map(str::to_owned)
+                .collect(),
+        );
+        for (ms, text) in [(0u64, "the quick "), (1200, "brown fox "), (2400, "jumps ")] {
+            app.set_elapsed(Duration::from_millis(ms));
+            for c in text.chars() {
+                app.type_char(c);
+            }
+        }
+        app.set_elapsed(Duration::from_secs(seconds));
+        app.tick();
+        app
+    }
+
+    #[test]
+    fn a_test_that_runs_out_shows_its_result() {
+        let app = finished(12);
+        assert!(app.test().is_finished());
+        assert_eq!(app.screen_kind(), ScreenKind::Results);
+        assert!(app.result().is_some());
+    }
+
+    #[test]
+    fn the_result_screen_stays_up_instead_of_being_re_shown() {
+        let mut app = finished(12);
+        for _ in 0..5 {
+            app.tick();
+        }
+        assert_eq!(app.screen_kind(), ScreenKind::Results);
+    }
+
+    /// The old client's worst bug, in its other form: a test that ended and left
+    /// you staring at a frozen word list with the score nowhere on screen.
+    #[test]
+    fn a_finished_test_reports_a_score_rather_than_a_hanging_clock() {
+        let app = finished(12);
+        let result = app.result().expect("a result");
+        assert!(result.wpm > 0.0, "got {}", result.wpm);
+        assert!(result.accuracy > 0.0);
+        assert_eq!(
+            result.duration_secs, 12.0,
+            "the clock stopped where it ended"
+        );
+        assert!(!result.chart.is_empty());
+    }
+
+    #[test]
+    fn an_unstarted_test_has_no_result_to_show() {
+        let app = app();
+        assert!(app.result().is_none());
+    }
+
+    #[test]
+    fn a_result_is_scored_from_the_log_and_does_not_drift() {
+        let mut app = finished(12);
+        let first = app.result().expect("a result");
+        std::thread::sleep(Duration::from_millis(20));
+        for _ in 0..5 {
+            app.tick();
+        }
+        assert_eq!(app.result().expect("a result"), first);
+    }
+
+    #[test]
+    fn the_results_screen_ignores_typing() {
+        let mut app = finished(12);
+        let before = app.result().expect("a result");
+        for c in "more typing".chars() {
+            app.press(KeyCode::Char(c));
+        }
+        assert_eq!(app.result().expect("a result"), before);
+        assert_eq!(app.screen_kind(), ScreenKind::Results);
+    }
+
+    #[test]
+    fn esc_from_the_result_starts_a_new_test() {
+        let mut app = finished(12);
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert_eq!(app.screen_kind(), ScreenKind::Typing);
+        assert!(!app.test().is_started(), "a new test has not begun");
+        assert_eq!(app.elapsed_secs(), 0.0);
+    }
+
+    #[test]
+    fn ctrl_r_from_the_result_starts_a_new_test_too() {
+        let mut app = finished(12);
+        app.on_key(press_mod(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .expect("no io");
+        assert_eq!(app.screen_kind(), ScreenKind::Typing);
+        assert!(!app.test().is_started());
+    }
+
+    #[test]
+    fn a_word_count_test_shows_a_result_when_the_words_run_out() {
+        let mut config = Config::default();
+        config.test.mode = crate::config::Mode::Words;
+        config.test.words = 3;
+        let mut app = App::new(config, PathBuf::from("/nonexistent/config.toml"));
+        app.set_words(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]);
+        app.set_elapsed(Duration::from_millis(500));
+        for _ in 0..3 {
+            app.type_char('a');
+            app.type_char(' ');
+        }
+        assert!(app.test().is_finished(), "the words ran out");
+        assert_eq!(app.screen_kind(), ScreenKind::Results);
+        // Two characters of `correct_word` over half a second. Only the first
+        // word was right — the other two were typed as "a" — and a word-count
+        // test credits nothing that is not exact.
+        assert_eq!(app.result().expect("a result").wpm, 48.0);
     }
 
     #[test]

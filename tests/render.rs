@@ -7,6 +7,10 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::Terminal;
 
+use std::path::PathBuf;
+use std::time::Duration;
+
+use crossterm::event::KeyCode;
 use ratatui::layout::Rect;
 
 use monkeytuipe::app::App;
@@ -382,4 +386,108 @@ fn the_settings_screen_marks_the_selected_row() {
         selected > 0,
         "nothing on the settings screen is highlighted"
     );
+}
+
+/// A finished test, ready to be looked at.
+fn finished_app(seconds: u64) -> App {
+    let mut config = Config::default();
+    config.test.time = 10;
+    let mut app = App::new(config, PathBuf::from("/nonexistent/config.toml"));
+    app.set_words(
+        "the child become possible point face back the here however not still any"
+            .split(' ')
+            .map(str::to_owned)
+            .collect(),
+    );
+    for (ms, text) in [
+        (0u64, "the child become "),
+        (1400, "possible point "),
+        (3000, "face back the "),
+        (4600, "here however "),
+        (6000, "not still any "),
+    ] {
+        app.set_elapsed(Duration::from_millis(ms));
+        for c in text.chars() {
+            app.type_char(c);
+        }
+    }
+    app.set_elapsed(Duration::from_secs(seconds));
+    app.tick();
+    app
+}
+
+#[test]
+fn a_finished_test_shows_its_result_by_itself() {
+    let app = finished_app(12);
+    assert_eq!(app.screen_kind(), ScreenKind::Results);
+}
+
+#[test]
+fn the_results_screen_shows_the_headline_figures() {
+    let buffer = render(&finished_app(12), 74, 26);
+    let screen = lines(&buffer).join("\n");
+    for label in ["wpm", "raw", "chars", "acc", "cons", "time"] {
+        assert!(screen.contains(label), "{label} is missing from the result");
+    }
+    // The figures are numbers, not placeholders.
+    assert!(
+        screen.contains("acc 100.0%") || screen.contains("acc 99."),
+        "no accuracy in {screen:?}"
+    );
+}
+
+#[test]
+fn the_results_screen_draws_the_chart() {
+    let buffer = render(&finished_app(12), 74, 26);
+    let screen = lines(&buffer).join("\n");
+    assert!(
+        screen.contains('█') || screen.contains('─'),
+        "no chart in {screen:?}"
+    );
+}
+
+#[test]
+fn the_results_screen_lists_the_keys_that_were_used() {
+    let buffer = render(&finished_app(12), 74, 26);
+    let screen = lines(&buffer).join("\n");
+    for key in ['e', 't', 'h'] {
+        assert!(
+            screen.contains(key),
+            "the letter table is missing {key:?}: {screen:?}"
+        );
+    }
+    assert!(screen.contains('\u{2423}'), "the space is shown as a glyph");
+}
+
+#[test]
+fn the_results_screen_offers_a_way_out() {
+    let screen = lines(&render(&finished_app(12), 74, 26)).join("\n");
+    assert!(screen.contains("ctrl+r again"), "{screen:?}");
+    assert!(screen.contains("ctrl+c quit"), "{screen:?}");
+}
+
+/// A result you are looking at must not change under you.
+#[test]
+fn the_result_does_not_change_while_it_is_on_screen() {
+    let mut app = finished_app(12);
+    let before = lines(&render(&app, 74, 26));
+    let scored = app.result().expect("a result");
+
+    std::thread::sleep(Duration::from_millis(30));
+    for _ in 0..5 {
+        app.tick();
+    }
+    // Input on the results screen is dropped, not applied to a frozen test.
+    app.press(KeyCode::Char('z'));
+
+    let after = lines(&render(&app, 74, 26));
+    assert_eq!(before, after, "the screen moved on its own");
+    assert_eq!(app.result().expect("a result"), scored, "the score changed");
+}
+
+#[test]
+fn the_results_screen_survives_a_tiny_terminal() {
+    for (width, height) in [(1u16, 1u16), (4, 3), (10, 4), (20, 6), (200, 60)] {
+        let _ = render(&finished_app(12), width, height);
+    }
 }

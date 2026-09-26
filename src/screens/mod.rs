@@ -5,6 +5,7 @@
 //! applies. That keeps the data flow one-directional and lets a screen be
 //! unit-tested without an `App`.
 
+pub mod results;
 pub mod settings;
 pub mod typing;
 
@@ -40,6 +41,8 @@ pub enum ScreenKind {
     #[default]
     Typing,
     Settings,
+    /// What the last test came to.
+    Results,
 }
 
 impl ScreenKind {
@@ -47,6 +50,7 @@ impl ScreenKind {
         match self {
             Self::Typing => "typing",
             Self::Settings => "settings",
+            Self::Results => "results",
         }
     }
 }
@@ -80,6 +84,7 @@ pub trait Screen {
 pub enum ScreenState {
     Typing(typing::Typing),
     Settings(settings::Settings),
+    Results(results::Results),
 }
 
 impl Default for ScreenState {
@@ -93,6 +98,7 @@ impl ScreenState {
         match self {
             Self::Typing(_) => ScreenKind::Typing,
             Self::Settings(_) => ScreenKind::Settings,
+            Self::Results(_) => ScreenKind::Results,
         }
     }
 
@@ -100,7 +106,7 @@ impl ScreenState {
     pub fn selected_row(&self) -> Option<Row> {
         match self {
             Self::Settings(state) => state.selected_row(),
-            Self::Typing(_) => None,
+            Self::Typing(_) | Self::Results(_) => None,
         }
     }
 
@@ -108,6 +114,7 @@ impl ScreenState {
         match self {
             Self::Typing(screen) => screen.render(app, frame),
             Self::Settings(screen) => screen.render(app, frame),
+            Self::Results(screen) => screen.render(app, frame),
         }
     }
 
@@ -115,6 +122,7 @@ impl ScreenState {
         match self {
             Self::Typing(screen) => screen.handle(action),
             Self::Settings(screen) => screen.handle(action),
+            Self::Results(screen) => screen.handle(action),
         }
     }
 }
