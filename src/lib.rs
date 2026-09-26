@@ -5,6 +5,9 @@
 //! - [`app::App`] owns all state and the event loop.
 //! - [`screens`] render and translate input into [`screens::Effect`]s.
 //! - [`config`] is the on-disk `config.toml` plus themes and keybinds.
+//! - [`engine`] is the test itself: words, input, and per-word state.
+//! - [`words`] generates a test's word list and fetches languages on demand.
+//! - [`stats`] is the scoring arithmetic, ported from the website.
 //! - [`api`] is the typed monkeytype HTTP client.
 //! - [`terminal`] owns raw mode and the alternate screen, and restores both on panic.
 
@@ -16,3 +19,4 @@ pub mod engine;
 pub mod screens;
 pub mod stats;
 pub mod terminal;
+pub mod words;

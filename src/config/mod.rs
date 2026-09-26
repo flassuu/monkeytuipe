@@ -69,6 +69,12 @@ pub struct TestConfig {
     pub numbers: bool,
     pub difficulty: Difficulty,
     pub blind: bool,
+    /// Bias word choice towards the frequent end of a frequency-ordered list.
+    ///
+    /// Off by default to match the website. On a 200-word list it makes the
+    /// test much more like real prose and much less varied, so it is a taste
+    /// call rather than an improvement.
+    pub zipf: bool,
     pub quotes: String,
 }
 
@@ -137,6 +143,7 @@ impl Default for TestConfig {
             numbers: false,
             difficulty: Difficulty::default(),
             blind: false,
+            zipf: false,
             quotes: "none".to_owned(),
         }
     }

@@ -1,6 +1,7 @@
 //! Application state and event loop.
 
 use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -13,18 +14,46 @@ use crate::engine::{Mode, Test};
 use crate::screens::{Effect, Row, Screen, ScreenKind, ScreenState};
 use crate::stats::{calculate_wpm, CharCounts};
 use crate::terminal::Tui;
+use crate::words::language::{self, Language};
+use crate::words::{self, Options as WordOptions};
 
 /// How often the clock redraws. 100ms keeps the countdown readable without
 /// burning CPU on a redraw loop that has nothing to animate.
 pub const TICK: Duration = Duration::from_millis(100);
 
-/// Word count in a placeholder test, until the real generator lands.
-const PLACEHOLDER_WORDS: usize = 40;
+/// The language used until the configured one has been fetched.
+///
+/// An offline start has to render something, and English is the one list that
+/// is always in the binary. The status line says so rather than pretending the
+/// test is in the requested language.
+const FALLBACK_LANGUAGE: &str = "english";
+
+/// A language being fetched in the background.
+struct Pending {
+    id: String,
+}
 
 pub struct App {
     pub config: Config,
     screen: ScreenState,
     test: Test,
+    /// The word list in use, and the id it came from.
+    language: Language,
+    /// The language the config asks for.
+    ///
+    /// Kept apart from [`Self::language`] because the two legitimately differ:
+    /// a list that is neither embedded nor cached leaves the app on the
+    /// fallback, and the status line has to be able to say so.
+    requested: String,
+    /// A language being fetched, if one is.
+    pending: Option<Pending>,
+    /// Where a finished fetch is delivered.
+    ///
+    /// The event loop is synchronous, so a download is run as a task and the
+    /// result handed back through this channel, drained by [`Self::tick`].
+    inbox: Receiver<Language>,
+    /// The other half of `inbox`, kept so a fetch can be started at any time.
+    inbox_sender: Sender<Language>,
     /// Wall-clock reading of when the test began, if it has.
     anchor: Option<Instant>,
     /// How long the test has been running. Cached so it can be set directly by
@@ -39,15 +68,113 @@ impl App {
     /// Builds an app from a loaded config, seeding a test so the UI is
     /// populated before the first keystroke.
     pub fn new(config: Config, config_path: PathBuf) -> Self {
-        let test = Test::new(placeholder_words(), Mode::Time, config.test.time);
-        Self {
+        let (tx, inbox) = channel();
+        let mut app = Self {
+            inbox_sender: tx,
+            language: language::embedded(FALLBACK_LANGUAGE).expect("english is embedded"),
+            requested: FALLBACK_LANGUAGE.to_owned(),
+            pending: None,
+            inbox,
             config,
             screen: ScreenState::default(),
-            test,
+            test: Test::new(Vec::new(), Mode::Time, 30),
             anchor: None,
             elapsed: Duration::ZERO,
             config_path,
             dirty: false,
+        };
+        app.start_language(app.config.test.language.clone());
+        app
+    }
+
+    // ---- word lists ----------------------------------------------------
+
+    /// The word list in use.
+    pub fn language(&self) -> &Language {
+        &self.language
+    }
+
+    /// A short note about the word list for the status line, e.g. `russian` or
+    /// `russian (downloading)`.
+    pub fn language_status(&self) -> String {
+        match &self.pending {
+            Some(pending) => format!("{} ↓", pending.id),
+            None if self.language.id() != self.requested => {
+                format!("{} (offline)", self.language.id())
+            }
+            None => self.language.id().to_owned(),
+        }
+    }
+
+    /// Switches to a language, fetching it first if it is not in the binary.
+    ///
+    /// The UI keeps working throughout: an unembedded language is fetched in the
+    /// background and swapped in when it lands, rather than blocking the first
+    /// frame on the network.
+    pub fn start_language(&mut self, id: String) {
+        self.requested = id.clone();
+        if let Some(language) = language::embedded(&id) {
+            self.install(language);
+            return;
+        }
+        if !words::fetch::is_available_offline(&id) {
+            // Nothing to fetch and nothing cached, so there is no point starting
+            // a download the user cannot wait for. Say which list is in use.
+            self.pending = None;
+            return;
+        }
+        if self.pending.as_ref().is_some_and(|p| p.id == id) {
+            return;
+        }
+        let tx: Sender<Language> = self.inbox_tx();
+        self.pending = Some(Pending { id: id.clone() });
+        // A test built in a synchronous context (a headless test, say) has no
+        // runtime to spawn onto; the fallback list stands in until a fetch is
+        // started deliberately.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Ok(language) = words::fetch::fetch(&id).await {
+                    let _ = tx.send(language);
+                }
+            });
+        }
+    }
+
+    /// The channel half, cloned out of the receiver.
+    ///
+    /// `Receiver` has no clone, so the sender is kept alongside it for the life
+    /// of the app instead.
+    fn inbox_tx(&self) -> Sender<Language> {
+        self.inbox_sender.clone()
+    }
+
+    fn install(&mut self, language: Language) {
+        self.language = language;
+        self.pending = None;
+        self.regenerate();
+    }
+
+    /// Builds a fresh word list from the current language and config, and starts
+    /// a new test with it.
+    pub fn regenerate(&mut self) {
+        let options = WordOptions {
+            count: self.word_count(),
+            punctuation: self.config.test.punctuation,
+            numbers: self.config.test.numbers,
+            difficulty: self.config.test.difficulty,
+            zipf: self.config.test.zipf,
+        };
+        let words = words::Generator::new(&self.language, options).generate();
+        self.test = Test::new(words, self.test.mode(), self.test.mode2());
+        self.reset_clock();
+    }
+
+    /// How many words the test needs.
+    fn word_count(&self) -> usize {
+        match self.config.test.mode {
+            crate::config::Mode::Time => WordOptions::for_duration(self.config.test.time).count,
+            crate::config::Mode::Words => self.config.test.words as usize,
+            crate::config::Mode::Quote => 100,
         }
     }
 
@@ -238,6 +365,7 @@ impl App {
     /// The ticker is the only source of time, so the countdown and the timeout
     /// never depend on when a keystroke happened to arrive.
     pub fn tick(&mut self) {
+        self.drain_languages();
         if self.test.is_finished() {
             self.freeze_clock();
             return;
@@ -246,6 +374,16 @@ impl App {
             self.elapsed = anchor.elapsed();
         }
         self.check_timeout();
+    }
+
+    /// Picks up a word list a background fetch has finished with.
+    fn drain_languages(&mut self) {
+        loop {
+            match self.inbox.try_recv() {
+                Ok(language) => self.install(language),
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return,
+            }
+        }
     }
 
     /// Stops the clock where the test ended.
@@ -298,8 +436,7 @@ impl App {
                 false
             }
             Effect::RestartTest => {
-                self.test = Test::new(placeholder_words(), self.test.mode(), self.test.mode2());
-                self.reset_clock();
+                self.regenerate();
                 false
             }
             Effect::Type(c) => {
@@ -334,6 +471,8 @@ impl App {
             Row::Theme => self.config.theme = self.config.theme.next(),
             Row::Language => {
                 self.config.test.language = next_language(&self.config.test.language);
+                let id = self.config.test.language.clone();
+                self.start_language(id);
             }
             Row::Punctuation => self.config.test.punctuation = !self.config.test.punctuation,
             Row::Numbers => self.config.test.numbers = !self.config.test.numbers,
@@ -454,24 +593,14 @@ impl App {
     }
 }
 
-/// A placeholder word list until the real generator lands in a later phase.
-fn placeholder_words() -> Vec<String> {
-    const WORDS: &[&str] = &[
-        "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog", "and", "then",
-    ];
-    (0..PLACEHOLDER_WORDS)
-        .map(|i| WORDS[i % WORDS.len()].to_owned())
-        .collect()
-}
-
-/// Cycles through a short language list until the real language set is wired in.
+/// Cycles through the languages that work with no network.
 fn next_language(current: &str) -> String {
-    const LANGUAGES: &[&str] = &["english", "russian", "german"];
-    LANGUAGES
-        .iter()
-        .position(|l| *l == current)
-        .map(|i| LANGUAGES[(i + 1) % LANGUAGES.len()].to_owned())
-        .unwrap_or_else(|| LANGUAGES[0].to_owned())
+    let ids: Vec<&str> = language::embedded_ids().collect();
+    let position = ids.iter().position(|id| *id == current);
+    match position {
+        Some(index) => ids[(index + 1) % ids.len()].to_owned(),
+        None => ids.first().copied().unwrap_or(FALLBACK_LANGUAGE).to_owned(),
+    }
 }
 
 /// Normalises a key event to the spelling used in `config.toml`.
@@ -517,6 +646,17 @@ mod tests {
     fn app() -> App {
         let dir = std::env::temp_dir().join(format!("monkeytuipe-app-{}", std::process::id()));
         App::new(Config::default(), dir.join("config.toml"))
+    }
+
+    /// An app whose word list is pinned.
+    ///
+    /// The app generates real words now, so a test that types a specific string
+    /// has to say what it is typing against — otherwise it is testing whatever
+    /// the generator happened to produce.
+    fn app_with(words: &[&str]) -> App {
+        let mut app = app();
+        app.set_words(words.iter().map(|w| (*w).to_owned()).collect());
+        app
     }
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -726,8 +866,8 @@ mod tests {
 
     #[test]
     fn caret_column_counts_words_and_gaps() {
-        let app = app();
-        // The placeholder list starts: the(3) quick(5) brown(5) ...
+        let app = app_with(&["the", "quick", "brown", "fox"]);
+        // the(3) quick(5) brown(5) ...
         // A four-row window keeps one word of context above the active word, so
         // the window starts at `cursor - 1` once the cursor passes the first row.
         assert_eq!(app.scroll_offset_from(0, 4), 0);
@@ -770,7 +910,7 @@ mod tests {
 
     #[test]
     fn typing_moves_the_caret_and_updates_the_counters() {
-        let mut app = app();
+        let mut app = app_with(&["the", "quick", "brown", "fox"]);
         type_text(&mut app, "the ");
         assert_eq!(app.cursor_word(), 1);
         assert!(
@@ -793,7 +933,7 @@ mod tests {
 
     #[test]
     fn a_mistyped_character_lowers_the_accuracy_but_not_the_word_count() {
-        let mut app = app();
+        let mut app = app_with(&["the", "quick", "brown", "fox"]);
         // "tge" against the target "the": one wrong letter, right space.
         type_text(&mut app, "tge ");
         assert!(
@@ -811,7 +951,7 @@ mod tests {
     fn a_transposed_word_costs_two_keystrokes() {
         // "teh" against "the" mistypes two characters, because the caret does not
         // skip ahead when a letter goes wrong.
-        let mut app = app();
+        let mut app = app_with(&["the", "quick", "brown", "fox"]);
         type_text(&mut app, "teh ");
         assert!(
             (app.accuracy() - 50.0).abs() < 1e-9,
@@ -874,7 +1014,7 @@ mod tests {
 
     #[test]
     fn the_test_ends_when_the_clock_runs_out() {
-        let mut app = app();
+        let mut app = app_with(&["the", "quick", "brown", "fox"]);
         type_text(&mut app, "the qui");
         app.set_elapsed(Duration::from_secs(app.config.test.time as u64));
         app.tick();
@@ -888,7 +1028,7 @@ mod tests {
 
     #[test]
     fn the_clock_does_not_end_the_test_early() {
-        let mut app = app();
+        let mut app = app_with(&["the", "quick", "brown", "fox"]);
         type_text(&mut app, "the");
         app.set_elapsed(Duration::from_secs(u64::from(app.config.test.time) - 1));
         app.tick();
@@ -898,7 +1038,7 @@ mod tests {
 
     #[test]
     fn typing_after_the_test_ends_changes_nothing() {
-        let mut app = app();
+        let mut app = app_with(&["the", "quick", "brown", "fox"]);
         type_text(&mut app, "the ");
         app.set_elapsed(Duration::from_secs(u64::from(app.config.test.time)));
         app.tick();
@@ -910,7 +1050,7 @@ mod tests {
 
     #[test]
     fn a_restart_clears_the_characters_too() {
-        let mut app = app();
+        let mut app = app_with(&["the", "quick", "brown", "fox"]);
         type_text(&mut app, "the quick brown fox ");
         assert!(app.test().chars().correct_word > 0);
         app.on_key(press_mod(KeyCode::Char('r'), KeyModifiers::CONTROL))
@@ -955,6 +1095,90 @@ mod tests {
     /// Before the clock was frozen, the wall clock kept feeding `elapsed` after
     /// `finish()`, so the wpm on a finished test decayed for as long as the
     /// screen stayed up.
+    // ---- word generation ------------------------------------------------
+
+    #[test]
+    fn a_new_app_generates_a_test_in_the_configured_language() {
+        let mut config = Config::default();
+        config.test.language = "russian".to_owned();
+        config.test.time = 15;
+        let app = App::new(config, PathBuf::from("/nonexistent/config.toml"));
+
+        assert_eq!(app.language().id(), "russian");
+        assert_eq!(app.language_status(), "russian");
+        let words = app.test().words();
+        assert!(!words.is_empty(), "the UI would be empty");
+        // A 15s test gets the same generous batch a 30s one does, so a slow
+        // typist cannot run off the end of the list mid-test.
+        assert_eq!(words.len(), 100);
+        for word in words {
+            let text = word.text();
+            assert!(text.ends_with(' '), "{text:?} lost its commit character");
+            assert!(
+                !text.trim_end_matches(' ').is_empty(),
+                "a word cannot be blank"
+            );
+        }
+    }
+
+    #[test]
+    fn a_restart_makes_a_different_test() {
+        let mut app = app();
+        let before: Vec<String> = app
+            .test()
+            .words()
+            .iter()
+            .map(|w| w.text().to_owned())
+            .collect();
+        app.regenerate();
+        let after: Vec<String> = app
+            .test()
+            .words()
+            .iter()
+            .map(|w| w.text().to_owned())
+            .collect();
+        assert_eq!(before.len(), after.len());
+        assert_ne!(before, after, "a restart should shuffle the word list");
+    }
+
+    #[test]
+    fn switching_language_swaps_the_word_list() {
+        let mut app = app();
+        assert_eq!(app.language().id(), "english");
+        app.start_language("german".to_owned());
+        assert_eq!(app.language().id(), "german");
+        assert_eq!(app.language_status(), "german");
+    }
+
+    /// A language that is neither embedded nor cached cannot be fetched from a
+    /// synchronous test, and the app has to say which list it is actually using
+    /// rather than quietly typing German in an English test.
+    #[test]
+    fn an_unavailable_language_says_so_instead_of_lying() {
+        let mut config = Config::default();
+        config.test.language = "klingon".to_owned();
+        let app = App::new(config, PathBuf::from("/nonexistent/config.toml"));
+        assert_eq!(
+            app.language().id(),
+            FALLBACK_LANGUAGE,
+            "it should fall back rather than render nothing"
+        );
+        assert!(
+            app.language_status().contains("offline"),
+            "got {:?}",
+            app.language_status()
+        );
+    }
+
+    #[test]
+    fn word_count_follows_the_mode() {
+        let mut config = Config::default();
+        config.test.mode = crate::config::Mode::Words;
+        config.test.words = 7;
+        let app = App::new(config, PathBuf::from("/nonexistent/config.toml"));
+        assert_eq!(app.test().words().len(), 7);
+    }
+
     #[test]
     fn the_clock_stops_when_the_test_ends() {
         let mut app = app();

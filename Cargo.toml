@@ -42,6 +42,7 @@ thiserror = "2"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 unicode-width = "0.1" # must match the version ratatui lays text out with
 dirs = "5"
+rand = "0.9.5"
 
 [profile.release]
 lto = "thin"

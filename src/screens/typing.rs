@@ -156,6 +156,8 @@ fn render_stats(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
         Span::styled(format!("{:.0}%", app.accuracy()), theme.value()),
         Span::styled("  time ", theme.chrome()),
         Span::styled(app.countdown(), theme.value()),
+        Span::styled("  ·  ", theme.chrome()),
+        Span::styled(app.language_status(), theme.chrome()),
         Span::styled(
             if started {
                 "  ·  tab skip · ctrl+r restart · f2 settings"
