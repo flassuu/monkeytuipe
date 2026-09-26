@@ -62,6 +62,31 @@ impl Word {
         self.commit
     }
 
+    /// The whole target, commit character included — what the website calls
+    /// `textWithCommit`.
+    ///
+    /// The trailing space is part of the target, which is why leaving it untyped
+    /// counts as a missed character rather than nothing.
+    pub fn target(&self) -> String {
+        let mut target = String::with_capacity(self.text.len() + 1);
+        target.push_str(&self.text);
+        target.push(self.commit);
+        target
+    }
+
+    /// The UTF-16 position of the last thing entered, whether that was a
+    /// character or the commit.
+    ///
+    /// A committed word keeps its commit character out of [`Self::input`], so
+    /// the position of a backspace within it is the end of the text.
+    pub fn last_typed_index(&self) -> usize {
+        if self.commit_typed.is_some() {
+            self.text.encode_utf16().count()
+        } else {
+            self.input_len_utf16().saturating_sub(1)
+        }
+    }
+
     /// What the typist has entered so far, without the commit character.
     pub fn input(&self) -> &str {
         &self.input
@@ -201,10 +226,7 @@ impl Word {
     /// trailing-trim rule for a word the test ended on.
     pub fn count(&self, credit_partial: bool, is_final_word: bool) -> CharCounts {
         let input = self.input_for_counting(is_final_word);
-        let mut target = String::with_capacity(self.text.len() + 1);
-        target.push_str(&self.text);
-        target.push(self.commit);
-        count_chars(&input, &target, credit_partial)
+        count_chars(&input, &self.target(), credit_partial)
     }
 }
 

@@ -36,8 +36,16 @@ impl Mode {
     ///
     /// A timed test is still "going" when the clock runs out, so a half-typed
     /// word is scored as a partial one. A word-count test has no such grace.
-    fn credits_partial_words(self) -> bool {
+    pub fn credits_partial_words(self) -> bool {
         matches!(self, Mode::Time)
+    }
+
+    /// Whether the test is measured against a clock.
+    ///
+    /// A word-count test of zero words is "as many as you can in no time at
+    /// all", which the website treats as timed, so the phrase carries over.
+    pub fn is_timed(self, mode2: u32) -> bool {
+        matches!(self, Mode::Time) || (self == Mode::Words && mode2 == 0)
     }
 }
 

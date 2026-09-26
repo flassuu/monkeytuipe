@@ -12,7 +12,9 @@ use crate::config::theme::Theme;
 use crate::config::Config;
 use crate::engine::{Mode, Test};
 use crate::screens::{Effect, Row, Screen, ScreenKind, ScreenState};
-use crate::stats::{calculate_wpm, CharCounts};
+use crate::stats::{
+    build_chart, calculate_wpm, CharCounts, Chart, ChartContext, Event as LogEvent, EventLog,
+};
 use crate::terminal::Tui;
 use crate::words::language::{self, Language};
 use crate::words::{self, Options as WordOptions};
@@ -56,9 +58,23 @@ pub struct App {
     inbox_sender: Sender<Language>,
     /// Wall-clock reading of when the test began, if it has.
     anchor: Option<Instant>,
+    /// Everything the typist did, with timings.
+    ///
+    /// Nothing reads this while a test is running; it exists so the chart and the
+    /// per-key statistics can be rebuilt afterwards. The chart is the reason it
+    /// is written from the first keystroke rather than at the end: per-second
+    /// buckets need per-keystroke timings, and there is no other record of them.
+    log: EventLog,
     /// How long the test has been running. Cached so it can be set directly by
     /// tests and by any future replay.
     elapsed: Duration,
+    /// Whether the clock is being driven by hand rather than by the wall clock.
+    ///
+    /// Set by [`Self::set_elapsed`]. Without it a hand-set time would be thrown
+    /// away by the next keystroke, which re-anchors to `Instant::now()` — so a
+    /// test that set the clock to 1.2s and then typed would see every keystroke
+    /// land at zero.
+    manual_clock: bool,
     config_path: PathBuf,
     /// Set when the config no longer matches what is on disk.
     dirty: bool,
@@ -79,7 +95,9 @@ impl App {
             screen: ScreenState::default(),
             test: Test::new(Vec::new(), Mode::Time, 30),
             anchor: None,
+            log: EventLog::new(),
             elapsed: Duration::ZERO,
+            manual_clock: false,
             config_path,
             dirty: false,
         };
@@ -119,8 +137,10 @@ impl App {
         }
         if !words::fetch::is_available_offline(&id) {
             // Nothing to fetch and nothing cached, so there is no point starting
-            // a download the user cannot wait for. Say which list is in use.
+            // a download the user cannot wait for. Say which list is in use —
+            // and still build a test, or the typing screen would come up blank.
             self.pending = None;
+            self.regenerate();
             return;
         }
         if self.pending.as_ref().is_some_and(|p| p.id == id) {
@@ -165,8 +185,33 @@ impl App {
             zipf: self.config.test.zipf,
         };
         let words = words::Generator::new(&self.language, options).generate();
-        self.test = Test::new(words, self.test.mode(), self.test.mode2());
+        self.test = Test::new(words, self.test_mode(), self.test_length());
         self.reset_clock();
+        self.log.clear();
+    }
+
+    /// How long the test is, read from the config rather than from the test that
+    /// happens to exist.
+    ///
+    /// The engine's own `mode` would be circular — the test is rebuilt from this
+    /// very function — and keeping a second copy of the settings in the engine
+    /// is how `mode = "words"` in a config file ends up ignored.
+    fn test_mode(&self) -> Mode {
+        match self.config.test.mode {
+            crate::config::Mode::Time => Mode::Time,
+            crate::config::Mode::Words => Mode::Words,
+            crate::config::Mode::Quote => Mode::Quote,
+        }
+    }
+
+    /// Seconds for a timed test, words for a word-count one, and nothing for a
+    /// quote, whose length is the passage's own.
+    fn test_length(&self) -> u32 {
+        match self.config.test.mode {
+            crate::config::Mode::Time => self.config.test.time,
+            crate::config::Mode::Words => self.config.test.words,
+            crate::config::Mode::Quote => 0,
+        }
     }
 
     /// How many words the test needs.
@@ -282,6 +327,23 @@ impl App {
         self.test.accuracy()
     }
 
+    /// The wpm, burst and error series, as far as the test has got.
+    ///
+    /// Rebuilt from the event log on demand rather than kept up to date, so
+    /// there is no way for the chart and the engine to disagree: they are
+    /// computed from the same record, and the log is the only input.
+    pub fn chart(&self) -> Chart {
+        let targets: Vec<String> = self.test.words().iter().map(|w| w.target()).collect();
+        build_chart(
+            &self.log,
+            &ChartContext {
+                targets: &targets,
+                is_timed: self.test.mode().is_timed(self.test.mode2()),
+                end_ms: self.now_ms(),
+            },
+        )
+    }
+
     /// The countdown for the status line.
     ///
     /// Seconds for a timed test, words left for a word-count one.
@@ -330,8 +392,9 @@ impl App {
     /// The engine calls this with a freshly generated list; tests use it to
     /// control the words being rendered.
     pub fn set_words(&mut self, words: Vec<String>) {
-        self.test = Test::new(words, self.test.mode(), self.test.mode2());
+        self.test = Test::new(words, self.test_mode(), self.test_length());
         self.reset_clock();
+        self.log.clear();
     }
 
     /// Moves the caret to a word index, clamped to the list.
@@ -344,20 +407,25 @@ impl App {
             self.test.skip();
         }
     }
-    /// Sets how long the test has been running.
+    /// Sets how long the test has been running, and detaches the clock.
     ///
-    /// This detaches the clock from the wall clock, so the next [`Self::tick`]
-    /// will not overwrite the value. The event loop never calls it; it exists for
-    /// tests and for a future replay, both of which have to drive time by hand.
+    /// Detaching means three things: the next [`Self::tick`] will not overwrite
+    /// the value, the next keystroke will not start the wall clock, and event
+    /// timestamps come from `elapsed` rather than from `Instant::now()`. The
+    /// event loop never calls it; it exists for tests and for a future replay,
+    /// both of which have to drive time by hand. [`Self::regenerate`] and
+    /// [`Self::set_words`] put the wall clock back.
     pub fn set_elapsed(&mut self, elapsed: Duration) {
         self.anchor = None;
         self.elapsed = elapsed;
+        self.manual_clock = true;
     }
 
     /// Resets the clock and clears the anchor, so time runs again from zero.
     fn reset_clock(&mut self) {
         self.elapsed = Duration::ZERO;
         self.anchor = None;
+        self.manual_clock = false;
     }
 
     /// Advances the clock, ending the test if its time is up.
@@ -368,12 +436,14 @@ impl App {
         self.drain_languages();
         if self.test.is_finished() {
             self.freeze_clock();
+            self.close_log();
             return;
         }
         if let Some(anchor) = self.anchor {
             self.elapsed = anchor.elapsed();
         }
         self.check_timeout();
+        self.close_log();
     }
 
     /// Picks up a word list a background fetch has finished with.
@@ -416,10 +486,74 @@ impl App {
                 // anchor here would restart the clock behind a frozen result.
                 return;
             }
-        } else {
+        } else if !self.manual_clock {
             self.anchor = Some(Instant::now());
         }
+
+        // Recorded before the engine sees the character, because afterwards the
+        // position it landed at no longer exists: a space has already ended the
+        // word and moved the caret on.
+        let word = self.test.active_index();
+        let index = self.test.active_word().input_len_utf16();
+        let correct = self.test.active_word().accepts(c);
         self.test.input(c);
+        // The commit character is a keystroke like any other and has to be in the
+        // log: the chart's replay rebuilds each word's input from the log, and a
+        // word whose space was never typed would read as unfinished.
+        self.log.push(
+            self.now_ms(),
+            LogEvent::Insert {
+                word,
+                index,
+                correct,
+                ch: c,
+            },
+        );
+        self.close_log();
+    }
+
+    /// Records a backspace against whichever word it actually lands in.
+    ///
+    /// The engine walks back into the previous word when the active one is
+    /// empty, so the word has to be worked out before the call, not after.
+    fn record_backspace(&mut self) {
+        let active = self.test.active_index();
+        let word = if !self.test.active_word().input().is_empty() {
+            active
+        } else if active > 0 {
+            active - 1
+        } else {
+            return;
+        };
+        let index = self
+            .test
+            .words()
+            .get(word)
+            .map_or(0, crate::engine::Word::last_typed_index);
+        self.log
+            .push(self.now_ms(), LogEvent::Delete { word, index });
+    }
+
+    /// Closes the log once the test is over, so the chart stops at the right
+    /// place rather than at the last keystroke.
+    fn close_log(&mut self) {
+        if self.test.is_finished() && !self.log.is_finished() {
+            self.log.finish(self.now_ms());
+        }
+    }
+
+    /// Milliseconds since the first keystroke, which is the origin every event
+    /// timestamp and every chart boundary is measured from.
+    ///
+    /// Read from the wall clock while the test runs so that keystrokes inside
+    /// one tick keep their real spacing; `tick` is still the only thing that
+    /// decides how long the test has been running, so a test driven by
+    /// [`Self::set_elapsed`] reports the time it was given.
+    fn now_ms(&self) -> f64 {
+        match self.anchor {
+            Some(anchor) if !self.manual_clock => anchor.elapsed().as_secs_f64() * 1000.0,
+            _ => self.elapsed.as_secs_f64() * 1000.0,
+        }
     }
 
     // ---- effects -------------------------------------------------------
@@ -444,14 +578,22 @@ impl App {
                 false
             }
             Effect::Backspace => {
+                self.record_backspace();
                 self.test.backspace();
                 false
             }
             Effect::SkipWord => {
-                if !self.test.is_started() {
+                if !self.test.is_started() && !self.manual_clock {
                     self.anchor = Some(Instant::now());
                 }
+                self.log.push(
+                    self.now_ms(),
+                    LogEvent::Skip {
+                        word: self.test.active_index(),
+                    },
+                );
                 self.test.skip();
+                self.close_log();
                 false
             }
             Effect::Adjust(row) => {
@@ -1057,6 +1199,200 @@ mod tests {
             .expect("no io");
         assert_eq!(app.test().chars(), CharCounts::default());
         assert_eq!(app.accuracy(), 0.0);
+    }
+
+    // ---- the event log ---------------------------------------------------
+
+    #[test]
+    fn the_log_records_every_keystroke_with_its_position() {
+        let mut app = app_with(&["the", "quick"]);
+        type_text(&mut app, "the ");
+        let events: Vec<_> = app.log.events().to_vec();
+        assert_eq!(events.len(), 4, "t, h, e and the commit space");
+
+        let words: Vec<usize> = events.iter().map(|e| e.event.word()).collect();
+        assert_eq!(words, [0, 0, 0, 0]);
+        let indices: Vec<usize> = events
+            .iter()
+            .map(|e| match e.event {
+                LogEvent::Insert { index, .. } => index,
+                other => panic!("expected an insert, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(indices, [0, 1, 2, 3], "the commit lands after the text");
+        assert!(events.iter().all(|e| e.ms <= 1000.0), "first second");
+    }
+
+    #[test]
+    fn the_log_records_a_wrong_character_as_wrong() {
+        let mut app = app_with(&["the"]);
+        type_text(&mut app, "tge ");
+        let wrong: Vec<bool> = app
+            .log
+            .inserts()
+            .map(|e| matches!(e.event, LogEvent::Insert { correct: false, .. }))
+            .collect();
+        assert_eq!(wrong, [false, true, false, false], "only 'g' is wrong");
+    }
+
+    #[test]
+    fn a_backspace_into_an_empty_word_is_recorded_against_the_word_left() {
+        let mut app = app_with(&["the", "quick"]);
+        type_text(&mut app, "the ");
+        assert_eq!(app.cursor_word(), 1, "the caret moved on");
+
+        app.on_key(press(KeyCode::Backspace)).expect("no io");
+        let last = app.log.events().last().expect("an event");
+        assert_eq!(app.cursor_word(), 0, "the caret walked back");
+        assert!(
+            matches!(last.event, LogEvent::Delete { word: 0, .. }),
+            "the deletion belongs to the first word, got {:?}",
+            last.event
+        );
+    }
+
+    #[test]
+    fn a_skip_is_recorded_against_the_word_it_skipped() {
+        let mut app = app_with(&["the", "quick"]);
+        app.on_key(press(KeyCode::Tab)).expect("no io");
+        let last = app.log.events().last().expect("an event");
+        assert!(matches!(last.event, LogEvent::Skip { word: 0 }));
+    }
+
+    #[test]
+    fn a_restart_clears_the_log() {
+        let mut app = app_with(&["the", "quick"]);
+        type_text(&mut app, "the ");
+        assert!(!app.log.is_empty());
+
+        app.on_key(press_mod(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .expect("no io");
+        assert!(app.log.is_empty(), "a new test starts from nothing");
+        assert!(app.chart().is_empty());
+    }
+
+    #[test]
+    fn the_log_stops_when_the_test_does() {
+        let mut app = app_with(&["the", "quick"]);
+        type_text(&mut app, "the qui");
+        app.set_elapsed(Duration::from_secs(u64::from(app.config.test.time)));
+        app.tick();
+
+        assert!(app.test().is_finished());
+        assert!(app.log.is_finished());
+        let frozen = app.log.recorded_end_ms().expect("the end was recorded");
+        // More time and more input must not extend the chart.
+        std::thread::sleep(Duration::from_millis(20));
+        app.type_char('c');
+        app.tick();
+        assert_eq!(app.log.recorded_end_ms(), Some(frozen));
+    }
+
+    #[test]
+    fn the_chart_grows_while_a_test_runs() {
+        let mut app = app_with(&["the", "quick", "brown", "fox"]);
+        // `set_elapsed` collapses the clock to a single point, so a scripted test
+        // can only place keystrokes at the start and at whatever time it sets.
+        type_text(&mut app, "the ");
+        app.set_elapsed(Duration::from_millis(1100));
+        type_text(&mut app, "quick ");
+        app.set_elapsed(Duration::from_millis(2400));
+
+        let chart = app.chart();
+        assert_eq!(chart.len(), 2, "two whole seconds have gone by");
+        assert_eq!(chart.burst[0], 48.0, "four characters in the first second");
+        assert_eq!(chart.burst[1], 72.0, "six in the second");
+        assert!(chart.err.iter().all(|e| *e == 0), "nothing was mistyped");
+        assert!(!chart.has_errors());
+    }
+
+    #[test]
+    fn an_empty_second_shows_up_as_a_dip_rather_than_being_skipped() {
+        let mut app = app_with(&["the", "quick", "brown", "fox"]);
+        type_text(&mut app, "the ");
+        app.set_elapsed(Duration::from_millis(2100));
+        type_text(&mut app, "q");
+        app.set_elapsed(Duration::from_millis(4200));
+        type_text(&mut app, "uick ");
+
+        let chart = app.chart();
+        assert_eq!(chart.len(), 4, "four whole seconds have gone by");
+        assert_eq!(chart.burst[0], 48.0, "'the ', four characters");
+        assert_eq!(chart.burst[1], 0.0, "nothing was typed in the second");
+        assert_eq!(chart.burst[2], 12.0, "one character in the third");
+        assert_eq!(chart.burst[3], 0.0, "and none in the fourth");
+    }
+
+    #[test]
+    fn the_chart_of_a_fresh_app_is_empty() {
+        let app = app();
+        assert!(app.chart().is_empty());
+        assert_eq!(app.chart().final_wpm(), 0.0);
+    }
+
+    #[test]
+    fn a_word_count_test_is_not_treated_as_timed() {
+        // The difference is visible: only on a clock does the half-typed word
+        // count, so a words test and a timed test over the same keystrokes give
+        // different curves.
+        let mut config = Config::default();
+        config.test.mode = crate::config::Mode::Words;
+        config.test.words = 2;
+        let mut app = App::new(config, PathBuf::from("/nonexistent/config.toml"));
+        app.set_words(vec!["the".to_owned(), "quick".to_owned()]);
+        assert_eq!(app.test().mode(), Mode::Words);
+
+        app.set_elapsed(Duration::from_millis(1200));
+        type_text(&mut app, "the q");
+        app.set_elapsed(Duration::from_millis(2200));
+        let chart = app.chart();
+
+        // The first bucket is empty: a hand-set clock puts every keystroke at
+        // 1.2s, and the first boundary is 1s.
+        assert_eq!(chart.burst[0], 0.0);
+        assert_eq!(chart.burst[1], 60.0, "five keystrokes in the second second");
+        // 'the ' is four finished characters; the 'q' of "quick" is not a word
+        // yet, so it earns nothing until the word is.
+        assert_eq!(chart.wpm[1], 24.0, "4 characters over 2 seconds");
+    }
+
+    #[test]
+    fn a_timed_test_credits_the_word_being_typed_on_the_chart() {
+        let mut app = app_with(&["the", "quick"]);
+        app.set_elapsed(Duration::from_millis(1200));
+        type_text(&mut app, "the q");
+        app.set_elapsed(Duration::from_millis(2200));
+
+        // Same keystrokes as above, but on a clock the 'q' counts as a prefix of
+        // "quick ", so the average is a character higher.
+        assert_eq!(app.chart().wpm[1], 30.0, "5 characters over 2 seconds");
+    }
+
+    #[test]
+    fn the_configured_mode_reaches_the_engine() {
+        // The mode used to be read back off the test being rebuilt, so
+        // `mode = "words"` in a config file was silently ignored.
+        for (mode, words, expected) in [
+            (crate::config::Mode::Time, 0u32, 10u32),
+            (crate::config::Mode::Words, 7, 7),
+        ] {
+            let mut config = Config::default();
+            config.test.mode = mode;
+            config.test.time = 10;
+            config.test.words = words;
+            let app = App::new(config, PathBuf::from("/nonexistent/config.toml"));
+            assert_eq!(app.test().mode2(), expected, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn an_unavailable_language_still_produces_a_test_to_type() {
+        // Nothing was fetched, so `start_language` returns early — and used to
+        // return before building a test, leaving the typing screen blank.
+        let mut config = Config::default();
+        config.test.language = "klingon".to_owned();
+        let app = App::new(config, PathBuf::from("/nonexistent/config.toml"));
+        assert!(!app.test().words().is_empty());
     }
 
     #[test]
