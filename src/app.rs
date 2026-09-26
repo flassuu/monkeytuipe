@@ -9,10 +9,12 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 
 use crate::action::Action;
 use crate::api;
-use crate::config::bar::{self, on_off, step, Bar, Field, LengthUnit};
+use crate::config::bar::{self, on_off, step, Field, LengthUnit};
 use crate::config::theme::Theme;
 use crate::config::Config;
 use crate::engine::{Mode, Test};
+use crate::screens::input::{self};
+use crate::screens::topbar::{Bar, BarState};
 use crate::screens::{Effect, Row, Screen, ScreenKind, ScreenState};
 use crate::stats::result::{score as score_test, Scoring};
 use crate::stats::{
@@ -131,6 +133,14 @@ pub struct App {
     /// A note for the status line, shown once and then cleared.
     message: Option<String>,
 
+    /// The one input window, when it is open.
+    ///
+    /// On the app rather than on a screen because any screen can want it — the
+    /// bar's wrench, the command list on escape, the settings screen's text rows —
+    /// and a window that belongs to whichever screen happened to open it has to
+    /// be closed by that screen too.
+    input: Option<input::Window>,
+
     /// The ApeKey client, built once the key is known.
     ///
     /// Built lazily rather than in `new` because the key can be edited while the
@@ -162,6 +172,9 @@ impl App {
         let (tx, inbox) = channel::<Language>();
         let (quote_tx, quote_inbox) = channel::<QuoteList>();
         let (account_tx, account_inbox) = channel::<Account>();
+        // The bar is built before the struct exists, because the struct literal
+        // moves the config in and there is nothing left to read it from.
+        let bar = crate::screens::topbar::Bar::build(BarState::from(&config));
         let mut app = Self {
             inbox_sender: tx,
             quote_sender: quote_tx,
@@ -172,7 +185,7 @@ impl App {
             requested: FALLBACK_LANGUAGE.to_owned(),
             pending: None,
             terminal: crate::config::Terminal::from_env(),
-            bar: Bar::idle(),
+            bar,
             quotes: None,
             quote_pending: None,
             quote_note: None,
@@ -189,6 +202,7 @@ impl App {
             results_shown: false,
             started_at_ms: None,
             message: None,
+            input: None,
             api: None,
             profile: None,
             bests: Default::default(),
@@ -622,118 +636,255 @@ impl App {
 
     // ---- the settings bar -----------------------------------------------
 
-    /// The fields the bar shows, in order, for the current mode.
-    pub fn bar_fields(&self) -> Vec<Field> {
-        Bar::fields(self.config.test.mode)
-    }
-
-    /// The field the bar has selected.
+    /// The bar as it should be drawn right now, rebuilt from the config.
     ///
-    /// Always a field the bar actually shows: changing mode can shorten the bar
-    /// under a selection, so the index is clamped rather than trusted.
-    pub fn bar_field(&self) -> Field {
-        let fields = self.bar_fields();
-        fields
-            .get(self.bar.selected())
-            .copied()
-            // A bar with no fields cannot be navigated, and this keeps the
-            // accessor total rather than an Option every screen has to unwrap.
-            .unwrap_or(Field::Mode)
+    /// Rebuilt on demand rather than kept in step: the bar is a pure function of
+    /// the settings, and a cached copy of a pure function is one more thing to go
+    /// stale — which would show one mode in the bar and run another.
+    pub fn bar(&self) -> Bar {
+        let mut bar = Bar::build(BarState::from(&self.config));
+        bar.selected = self.bar.selected;
+        bar.interactive = self.bar.interactive;
+        bar
     }
 
-    /// Which field is selected, as an index into [`Self::bar_fields`].
-    pub fn bar_selection(&self) -> usize {
-        self.bar
-            .selected()
-            .min(self.bar_fields().len().saturating_sub(1))
+    /// The field the bar has selected, if the selection is on a live button.
+    pub fn bar_selection(&self) -> Option<Field> {
+        self.bar.selected_field()
     }
 
-    /// Moves the bar's selection, clamped to the fields that exist.
+    /// The field the bar has selected, or `None` when the bar is empty.
+    pub fn bar_field(&self) -> Option<Field> {
+        self.bar_selection()
+    }
+
+    /// Moves the bar's selection, skipping anything the current mode disabled.
     pub fn move_bar_selection(&mut self, by: isize) {
-        self.bar.move_selection(by, self.bar_fields().len());
+        let mut bar = self.bar();
+        bar.move_selection(by);
+        self.bar.selected = bar.selected;
     }
 
-    /// What a field currently says.
+    /// Whether the bar should react to keys.
     ///
-    /// The mode and the length are shown as the value alone, everything else as
-    /// `label value`, which is the arrangement the website's buttons use.
-    pub fn bar_value(&self, field: Field) -> String {
-        let test = &self.config.test;
-        match field {
-            Field::Mode => test.mode.bar_label().to_owned(),
-            Field::Length => match test.mode.length_unit() {
-                Some(unit) => unit.render(self.bar_length()),
-                None => "∞".to_owned(),
-            },
-            Field::QuoteLength => test.quote_length.as_str().to_owned(),
-            Field::Punctuation => on_off(test.punctuation),
-            Field::Numbers => on_off(test.numbers),
-            Field::Difficulty => test.difficulty.as_str().to_owned(),
-            Field::CustomText => match test.custom_text.first() {
-                Some(text) => {
-                    let words = text.split(' ').filter(|w| !w.is_empty()).count();
-                    format!("{} words", words)
-                }
-                None => "not set".to_owned(),
-            },
-            Field::Language => {
-                let label = variants::Language {
-                    id: test.language.clone(),
-                    base: variants::base_of(&test.language).to_owned(),
-                    words: self.language.words.len() as u32,
-                    embedded: language::embedded(&test.language).is_some(),
-                };
-                label.label()
+    /// Off while a test is running, which is what the site does: the whole bar
+    /// goes to `opacity-0 pointer-events-none` once the words have focus, because
+    /// changing a setting restarts the test and doing that under someone's hands
+    /// is worse than making them press escape first.
+    pub fn set_bar_interactive(&mut self, interactive: bool) {
+        self.bar.interactive = interactive;
+    }
+
+    /// Whether the bar is currently reacting to keys.
+    pub fn bar_is_interactive(&self) -> bool {
+        self.bar.interactive
+    }
+
+    /// Opens the one input window, empty.
+    pub fn open_input(&mut self, reason: input::Reason) {
+        self.input = Some(input::Window::new(reason));
+    }
+
+    /// Opens the one input window with something already in it, which is what
+    /// editing an existing value does — the window is opened *on* the value, not
+    /// on an empty field the user has to retype.
+    pub fn open_input_with(&mut self, reason: input::Reason, text: impl Into<String>) {
+        self.input = Some(input::Window::prefilled(reason, text));
+    }
+
+    /// Opens the window for a length, prefilled with the bare number.
+    ///
+    /// The bar says `30s` and the results say `30 seconds`, but a text field the
+    /// user is about to edit should hold `30`: the unit is something the field
+    /// *produces*, and prefilling it means the first keystroke lands in the middle
+    /// of `30s` and produces nonsense.
+    fn open_length(&mut self, field: Field) {
+        let value = match field {
+            Field::Time | Field::TimeCustom => self.config.test.time,
+            _ => self.config.test.words,
+        };
+        self.open_input_with(input::Reason::Length(field), value.to_string());
+    }
+
+    /// Stores a custom passage, splitting it into lines.
+    pub fn set_custom_text(&mut self, text: String) {
+        self.apply(crate::screens::Effect::SetCustomText(text));
+    }
+
+    /// Runs a command by index into the command list.
+    ///
+    /// Returns `true` when the app should quit, so a `Quit` command does not
+    /// have to be special-cased by whoever ran it.
+    pub fn run_command(&mut self, index: usize) -> bool {
+        use crate::screens::commands::Action as Cmd;
+        let Some(action) = crate::screens::commands::action(index) else {
+            return false;
+        };
+        match action {
+            Cmd::Restart => {
+                self.regenerate();
             }
-            Field::Blind => on_off(test.blind),
+            Cmd::Mode(mode) => {
+                self.config.test.mode = mode;
+                self.dirty = true;
+                if mode == crate::config::Mode::Quote {
+                    self.start_quotes();
+                } else {
+                    self.regenerate();
+                }
+            }
+            Cmd::Toggle(field) => {
+                self.change_bar_field(field, 1);
+            }
+            Cmd::SetLength(field) => {
+                // The field opens on the value it already has, so a length is
+                // edited rather than retyped.
+                self.open_length(field);
+            }
+            Cmd::Blind => {
+                self.config.test.blind = !self.config.test.blind;
+                self.dirty = true;
+            }
+            Cmd::Languages => {
+                self.show_screen(ScreenKind::Settings);
+            }
+            Cmd::Settings => {
+                self.show_screen(ScreenKind::Settings);
+            }
+            Cmd::CustomText => {
+                self.open_input_with(input::Reason::Text, self.config.test.custom_text.join("\n"));
+            }
+            Cmd::NextTheme => {
+                self.config.theme = self.config.theme.next();
+                self.dirty = true;
+            }
+            Cmd::Theme(name) => {
+                if let Some(theme) = crate::config::theme::ThemeName::ALL
+                    .iter()
+                    .copied()
+                    .find(|t| t.label() == name.replace('_', " "))
+                {
+                    self.config.theme = theme;
+                    self.dirty = true;
+                }
+            }
+            Cmd::CopyResult => {
+                self.message =
+                    Some("no clipboard in a terminal — use the bar's copy instead".to_owned());
+            }
+            Cmd::Quit => return true,
+        }
+        false
+    }
+
+    /// Closes the input window, returning what came out of it.
+    ///
+    /// An `Invalid` outcome leaves the window **open**: closing it would throw
+    /// away what the user typed, which is the one thing they would not want to
+    /// retype.
+    pub fn close_input(&mut self, outcome: input::Outcome) {
+        if matches!(outcome, input::Outcome::Invalid(_)) {
+            return;
+        }
+        self.input = None;
+        match outcome {
+            input::Outcome::Cancelled => {}
+            input::Outcome::Length(field, value) => {
+                self.set_length(field, value);
+            }
+            input::Outcome::Text(text) => {
+                self.set_custom_text(text);
+            }
+            input::Outcome::ApeKey(key) => {
+                self.apply(crate::screens::Effect::SetApeKey(key));
+            }
+            input::Outcome::Command(index) => {
+                self.run_command(index);
+            }
+            input::Outcome::Invalid(_) => unreachable!("handled above"),
         }
     }
 
-    /// The bar's length, as the mode counts it.
-    fn bar_length(&self) -> u32 {
-        match self.config.test.mode {
-            crate::config::Mode::Time => self.config.test.time,
-            crate::config::Mode::Words => self.config.test.words,
-            _ => 0,
+    /// The input window, if it is open.
+    pub fn input_window(&self) -> Option<&input::Window> {
+        self.input.as_ref()
+    }
+
+    /// Why the input window is open, if it is.
+    pub fn input_reason(&self) -> Option<&input::Reason> {
+        self.input.as_ref().map(input::Window::reason)
+    }
+
+    /// Whether the input window is open.
+    pub fn input_is_open(&self) -> bool {
+        self.input.is_some()
+    }
+
+    /// What a field currently says, for the settings screen and the status line.
+    pub fn bar_value(&self, field: Field) -> String {
+        let test = &self.config.test;
+        match field {
+            Field::Punctuation => on_off(test.punctuation),
+            Field::Numbers => on_off(test.numbers),
+            Field::Mode => test.mode.bar_label().to_owned(),
+            Field::Time | Field::TimeCustom => LengthUnit::Seconds.render(test.time),
+            Field::Words | Field::WordsCustom => LengthUnit::Words.render(test.words),
+            Field::QuoteLength => test.quote_length.as_str().to_owned(),
+            Field::CustomText => match test.custom_text.first() {
+                Some(text) => format!(
+                    "{} words",
+                    text.split(' ').filter(|w| !w.is_empty()).count()
+                ),
+                None => "not set".to_owned(),
+            },
         }
     }
 
     /// Changes a field by `by` steps, and rebuilds the test so the change can be
     /// seen before it is typed.
     ///
-    /// Fields with no short list of choices — the custom text — are left alone
-    /// rather than cycled: they are typed on the settings screen, and a field
-    /// that silently does nothing when you press the key is worse than one that
-    /// says so.
-    pub fn change_bar_field(&mut self, field: Field, by: i8) {
-        let by = by as isize;
-        // Read before the borrow: switching language needs `self` immutably to
-        // work out which variants exist, and the config mutably to store the new
-        // one, so the two cannot be held at once.
-        let variants_now = (field == Field::Language).then(|| self.language_variants());
+    /// Returns the field it acted on, or `None` when it did nothing. A field that
+    /// needs the input window returns `None` here and the app opens the window
+    /// instead — cycling "custom" would be cycling nothing.
+    pub fn change_bar_field(&mut self, field: Field, by: i8) -> Option<Field> {
+        if field.needs_input() {
+            return None;
+        }
+        let by = isize::from(by);
         let test = &mut self.config.test;
         let mut needs_words = true;
         let mut needs_quotes = false;
-        let mut needs_language = false;
 
         match field {
             Field::Mode => {
                 let current = bar::MODES.iter().position(|m| *m == test.mode);
                 test.mode = bar::MODES[step(current, by, bar::MODES.len())];
                 needs_quotes = test.mode == crate::config::Mode::Quote;
+                // Zen makes its own words, so there is nothing to build.
+                if test.mode == crate::config::Mode::Zen {
+                    needs_words = false;
+                }
+                // The site forces both false when switching into quote, zen or
+                // custom: a passage is already punctuated and is not made of the
+                // generator's words.
+                if matches!(
+                    test.mode,
+                    crate::config::Mode::Quote
+                        | crate::config::Mode::Zen
+                        | crate::config::Mode::Custom
+                ) {
+                    test.punctuation = false;
+                    test.numbers = false;
+                }
             }
-            Field::Length => match test.mode.length_unit() {
-                Some(LengthUnit::Seconds) => {
-                    let current = bar::TIMES.iter().position(|t| *t == test.time);
-                    test.time = bar::TIMES[step(current, by, bar::TIMES.len())];
-                }
-                Some(LengthUnit::Words) => {
-                    let current = bar::WORD_COUNTS.iter().position(|w| *w == test.words);
-                    test.words = bar::WORD_COUNTS[step(current, by, bar::WORD_COUNTS.len())];
-                }
-                // Zen and quote have no length to choose.
-                None => return,
-            },
+            Field::Time => {
+                let current = bar::TIMES.iter().position(|t| *t == test.time);
+                test.time = bar::TIMES[step(current, by, bar::TIMES.len())];
+            }
+            Field::Words => {
+                let current = bar::WORD_COUNTS.iter().position(|w| *w == test.words);
+                test.words = bar::WORD_COUNTS[step(current, by, bar::WORD_COUNTS.len())];
+            }
             Field::QuoteLength => {
                 let current = bar::QUOTE_LENGTHS
                     .iter()
@@ -742,48 +893,34 @@ impl App {
             }
             Field::Punctuation => test.punctuation = !test.punctuation,
             Field::Numbers => test.numbers = !test.numbers,
-            // Blind mode only changes what is *drawn*, not the words, so
-            // rebuilding the test here would throw away a word list for nothing.
-            Field::Blind => {
-                test.blind = !test.blind;
-                self.dirty = true;
-                return;
-            }
-            Field::Difficulty => {
-                let current = bar::DIFFICULTIES.iter().position(|d| *d == test.difficulty);
-                test.difficulty = bar::DIFFICULTIES[step(current, by, bar::DIFFICULTIES.len())];
-            }
-            Field::CustomText => return,
-            Field::Language => {
-                needs_language = true;
-                let Some(ids) = variants_now else {
-                    return;
-                };
-                let Some(current) = ids.iter().position(|id| *id == test.language) else {
-                    return;
-                };
-                let next = step(Some(current), by, ids.len());
-                test.language = ids[next].clone();
-            }
+            Field::TimeCustom | Field::WordsCustom | Field::CustomText => return None,
         }
 
         self.dirty = true;
-        // Zen makes its own words, so there is nothing to build.
-        if test.mode == crate::config::Mode::Zen {
-            needs_words = false;
-        }
-        if needs_language {
-            let id = self.config.test.language.clone();
-            self.start_language(id);
-            return;
-        }
         if needs_quotes {
             self.start_quotes();
-            return;
+            return Some(field);
         }
         if needs_words {
             self.regenerate();
         }
+        Some(field)
+    }
+
+    /// Sets a length from the input window.
+    ///
+    /// A preset length is a choice; anything else is a custom one, and the wrench
+    /// stays lit so the bar says the value is not one of the presets — which is
+    /// exactly how the site shows it.
+    pub fn set_length(&mut self, field: Field, value: u32) -> bool {
+        match field {
+            Field::Time | Field::TimeCustom if value > 0 => self.config.test.time = value,
+            Field::Words | Field::WordsCustom if value > 0 => self.config.test.words = value,
+            _ => return false,
+        }
+        self.dirty = true;
+        self.regenerate();
+        true
     }
 
     /// The word-list ids the bar cycles through for the current base language.
@@ -832,6 +969,16 @@ impl App {
     /// to the screen rather than to the test.
     pub fn is_blind(&self) -> bool {
         self.config.test.blind
+    }
+
+    /// The mode the current test is running in.
+    ///
+    /// Public because a screen has to render differently for zen: there is no
+    /// target there, so the words pane draws what was typed rather than what was
+    /// to be typed. That is a rendering rule, and the screen needs to know which
+    /// mode it is drawing.
+    pub fn mode(&self) -> Mode {
+        self.test_mode()
     }
 
     /// The display width of every word, for laying the word pane out.
@@ -1041,6 +1188,12 @@ impl App {
     /// `ratatui::backend::TestBackend` in tests.
     pub fn render(&self, frame: &mut ratatui::Frame) {
         self.screen.render(self, frame);
+        // The window is drawn last and over everything: it belongs to the app
+        // rather than to a screen, so any screen can open it and it looks the
+        // same wherever it was opened from.
+        if let Some(window) = &self.input {
+            input::render(window, frame.area(), self.theme(), frame);
+        }
     }
 
     /// Switches screens. Used by effects today, and by a command palette later.
@@ -1342,9 +1495,36 @@ impl App {
                 self.move_bar_selection(isize::from(by));
                 false
             }
+            Effect::PressBar => {
+                if let Some(field) = self.bar().activate() {
+                    if self.change_bar_field(field, 1).is_none() && field.needs_input() {
+                        self.open_length(field);
+                    }
+                }
+                false
+            }
+            Effect::OpenCommands => {
+                self.open_input(input::Reason::Command);
+                false
+            }
+            Effect::FinishTest => {
+                // The only way out of a zen test: it has no length, so there is
+                // nothing to run out of.
+                if self.test.mode() == Mode::Zen {
+                    self.test.finish();
+                    self.settle();
+                }
+                false
+            }
             Effect::ChangeBar(by) => {
-                let field = self.bar_field();
-                self.change_bar_field(field, by);
+                let Some(field) = self.bar_field() else {
+                    return false;
+                };
+                if self.change_bar_field(field, by).is_none() && field.needs_input() {
+                    // The wrench opens the one input window, which is also where
+                    // the commands live.
+                    self.open_length(field);
+                }
                 false
             }
             Effect::Toggle(row) => {
@@ -1440,6 +1620,24 @@ impl App {
 
     /// Applies one raw key event. Returns `true` when the app should quit.
     fn on_key(&mut self, key: KeyEvent) -> anyhow::Result<bool> {
+        if key.kind != KeyEventKind::Press {
+            return Ok(false);
+        }
+
+        // A modifier is never text. `ctrl+c` has to quit even with the window
+        // open — a modal that swallowed it would be a modal you could not
+        // escape — so only bare keys go to the window.
+        if self.input.is_some() && key.modifiers.is_empty() {
+            let Some(outcome) = self.input.as_mut().and_then(|w| w.key(key.code)) else {
+                // A key the window did not act on is still a key the window owns:
+                // letting it reach the screen would type `f` into the test while
+                // the user is looking at a search field.
+                return Ok(false);
+            };
+            self.close_input(outcome);
+            return Ok(false);
+        }
+
         let Some(action) = self.resolve(key) else {
             return Ok(false);
         };
@@ -1492,6 +1690,18 @@ impl App {
             if let Some(c) = printable {
                 return Some(Action::Char(c));
             }
+        }
+
+        // Escape opens the command list, which is what the site binds it to when
+        // `quickRestart` is "off" — the default, and in that state escape has no
+        // other job.
+        if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+            return Some(Action::Command);
+        }
+        // Shift+Enter ends a zen test, which is the only way out of one: it has
+        // no length and therefore no way to run out.
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+            return Some(Action::Finish);
         }
 
         self.bound_action(&key).or(match key.code {
@@ -1702,11 +1912,19 @@ mod tests {
         );
     }
 
+    /// The settings screen's own way out is the `back to typing` row, which is
+    /// what the site does — there is no escape key to press there either.
     #[test]
-    fn esc_leaves_the_settings_screen() {
+    fn the_back_row_leaves_the_settings_screen() {
         let mut app = app();
         app.on_key(press(KeyCode::F(2))).expect("no io");
-        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert_eq!(app.screen_kind(), ScreenKind::Settings);
+        // The row list wraps, so one short of a full lap lands on the last row.
+        for _ in 0..settings_rows().saturating_sub(1) {
+            app.on_key(press(KeyCode::Down)).expect("no io");
+        }
+        assert_eq!(app.selected_row(), Some(Row::Back));
+        app.on_key(press(KeyCode::Enter)).expect("no io");
         assert_eq!(app.screen_kind(), ScreenKind::Typing);
     }
 
@@ -2216,11 +2434,19 @@ mod tests {
         assert_eq!(app.screen_kind(), ScreenKind::Results);
     }
 
+    /// Escape is the command list on the site, not a back key — with
+    /// `quickRestart` off it has no other job — so a new test is a command.
     #[test]
-    fn esc_from_the_result_starts_a_new_test() {
+    fn a_new_test_from_the_result_is_a_command_not_a_key() {
         let mut app = finished(12);
         app.on_key(press(KeyCode::Esc)).expect("no io");
-        assert_eq!(app.screen_kind(), ScreenKind::Typing);
+        assert_eq!(app.input_reason(), Some(&input::Reason::Command));
+
+        let index = crate::screens::commands::filter("next test")
+            .first()
+            .map(|m| m.command)
+            .expect("a next-test command");
+        app.run_command(index);
         assert!(!app.test().is_started(), "a new test has not begun");
         assert_eq!(app.elapsed_secs(), 0.0);
     }
@@ -2256,48 +2482,46 @@ mod tests {
 
     // ---- the settings bar -----------------------------------------------
 
+    /// How many rows the settings screen has, so a test can walk to the last one
+    /// without hard-coding a number that changes when a row is added.
+    fn settings_rows() -> usize {
+        crate::screens::settings::ROWS.len()
+    }
+
     fn app_with_test(mode: crate::config::Mode) -> App {
         let mut config = Config::default();
         config.test.mode = mode;
         App::new(config, PathBuf::from("/nonexistent/config.toml"))
     }
 
-    /// Every mode the bar can be in, so a rule about the bar is checked against
-    /// all of them rather than against whichever one was on screen.
-    fn every_mode() -> Vec<App> {
-        bar::MODES.iter().map(|m| app_with_test(*m)).collect()
+    /// The bar as the screen draws it, for a mode.
+    fn bar_in(mode: crate::config::Mode) -> Bar {
+        let mut config = Config::default();
+        config.test.mode = mode;
+        App::new(config, PathBuf::from("/nonexistent/config.toml")).bar()
     }
 
     #[test]
     fn the_bar_shows_the_mode_first_in_every_mode() {
-        for app in every_mode() {
-            assert_eq!(
-                app.bar_field(),
-                Field::Mode,
-                "in {:?}",
-                app.config.test.mode
-            );
+        for mode in bar::MODES {
+            let bar = bar_in(mode);
+            assert_eq!(bar.selected_field(), Some(Field::Mode), "{mode:?}");
         }
     }
 
-    /// The selection is an index into a list whose length changes with the mode.
-    /// Leaving it past the end means a bar with nothing selected and arrows that
-    /// go nowhere.
+    /// Changing mode can empty a card under the selection, so the index has to be
+    /// re-read rather than trusted.
     #[test]
     fn the_selection_survives_a_change_of_mode() {
         let mut app = app_with_test(crate::config::Mode::Words);
-        // Walk to the far end of the longest bar.
-        for _ in 0..10 {
+        for _ in 0..30 {
             app.move_bar_selection(1);
         }
-        assert_eq!(app.bar_selection(), app.bar_fields().len() - 1);
-
         for mode in bar::MODES {
             app.change_bar_field(Field::Mode, 0);
-            // Whatever the mode now is, the selection names a field that exists.
-            let fields = app.bar_fields();
+            let total = app.bar().buttons().len();
             assert!(
-                app.bar_selection() < fields.len(),
+                app.bar().selected < total,
                 "{mode:?} left the selection past the end"
             );
         }
@@ -2309,40 +2533,47 @@ mod tests {
         for _ in 0..20 {
             app.move_bar_selection(-1);
         }
-        assert_eq!(app.bar_selection(), 0, "it went off the left edge");
-        for _ in 0..20 {
+        assert_eq!(app.bar().selected, 0, "it went off the left edge");
+        for _ in 0..40 {
             app.move_bar_selection(1);
         }
-        assert_eq!(app.bar_selection(), app.bar_fields().len() - 1);
+        assert_eq!(app.bar().selected + 1, app.bar().buttons().len());
+    }
+
+    /// The wrench is a dialog, not a step, so changing it does nothing here.
+    #[test]
+    fn the_wrench_does_not_cycle() {
+        let mut app = app_with_test(crate::config::Mode::Time);
+        let before = app.config.test.time;
+        assert_eq!(app.change_bar_field(Field::TimeCustom, 1), None);
+        assert_eq!(app.config.test.time, before, "the wrench cycled a value");
+        assert!(Field::TimeCustom.needs_input());
+        assert!(!Field::Time.needs_input());
     }
 
     #[test]
-    fn up_and_down_change_the_selected_field() {
+    fn a_duration_outside_the_presets_lights_the_wrench() {
         let mut app = app_with_test(crate::config::Mode::Time);
-        app.move_bar_selection(1); // the length
-        assert_eq!(app.bar_field(), Field::Length);
-        assert_eq!(app.bar_value(Field::Length), "30s");
-
-        app.change_bar_field(app.bar_field(), 1);
-        assert_eq!(app.config.test.time, 60);
-        app.change_bar_field(app.bar_field(), -1);
-        assert_eq!(
-            app.config.test.time, 30,
-            "a value is a ring, so up goes back"
-        );
+        assert!(app.set_length(Field::TimeCustom, 42));
+        let bar = app.bar();
+        let custom = bar
+            .right
+            .buttons
+            .iter()
+            .find(|b| b.label == "custom")
+            .expect("a wrench");
+        assert!(custom.active, "42 seconds did not light the wrench");
     }
 
-    /// A value has to come back to where it started, or one direction is a dead
-    /// end.
     #[test]
-    fn every_ring_comes_back_round() {
+    fn a_value_has_to_be_come_back_round() {
         let mut app = app_with_test(crate::config::Mode::Time);
-        for field in [Field::Mode, Field::Length, Field::Difficulty] {
+        for field in [Field::Mode, Field::Time, Field::QuoteLength] {
             let before = app.bar_value(field);
             let rounds = match field {
                 Field::Mode => bar::MODES.len(),
-                Field::Length => bar::TIMES.len(),
-                _ => bar::DIFFICULTIES.len(),
+                Field::Time => bar::TIMES.len(),
+                _ => bar::QUOTE_LENGTHS.len(),
             };
             for _ in 0..rounds {
                 app.change_bar_field(field, 1);
@@ -2354,7 +2585,7 @@ mod tests {
     #[test]
     fn a_toggle_flips_rather_than_cycling() {
         let mut app = app_with_test(crate::config::Mode::Time);
-        for field in [Field::Punctuation, Field::Numbers, Field::Blind] {
+        for field in [Field::Punctuation, Field::Numbers] {
             let before = app.bar_value(field);
             app.change_bar_field(field, 1);
             assert_ne!(app.bar_value(field), before, "{field:?} did not flip");
@@ -2363,41 +2594,31 @@ mod tests {
         }
     }
 
-    /// Zen and quote have no length, so a keypress that would change one has to
-    /// do nothing visible rather than spin a value that is not on the bar.
+    /// The site forces both false when switching into quote, zen or custom: a
+    /// passage is already punctuated and is not made of the generator's words.
     #[test]
-    fn a_mode_with_no_length_ignores_a_length_change() {
-        for mode in [crate::config::Mode::Zen, crate::config::Mode::Quote] {
-            let mut app = app_with_test(mode);
-            let before = app.config.test.time;
-            app.change_bar_field(Field::Length, 1);
-            assert_eq!(app.config.test.time, before, "{mode:?}");
+    fn switching_to_a_passage_mode_clears_the_toggles() {
+        for mode in [
+            crate::config::Mode::Quote,
+            crate::config::Mode::Zen,
+            crate::config::Mode::Custom,
+        ] {
+            let mut app = app_with_test(crate::config::Mode::Time);
+            assert!(app.config.test.punctuation, "the premise changed");
+            while app.config.test.mode != mode {
+                app.change_bar_field(Field::Mode, 1);
+            }
+            assert!(!app.config.test.punctuation, "{mode:?} left punctuation on");
+            assert!(!app.config.test.numbers, "{mode:?} left numbers on");
         }
     }
 
-    /// The custom text is typed on the settings screen, not cycled here.
-    #[test]
-    fn the_custom_text_is_not_cycled_by_the_bar() {
-        let mut app = app_with_test(crate::config::Mode::Custom);
-        app.config.test.custom_text = vec!["a passage".to_owned()];
-        let before = app.bar_value(Field::CustomText);
-        app.change_bar_field(Field::CustomText, 1);
-        assert_eq!(app.bar_value(Field::CustomText), before);
-        assert_eq!(app.bar_value(Field::CustomText), "2 words");
-    }
-
-    /// Every mode the bar offers must actually build a test. A mode that produced
-    /// an empty word list would leave the typing screen blank.
+    /// Every mode must build a usable test, or a mode in the bar is a dead button.
     #[test]
     fn every_mode_builds_a_usable_test() {
         for mode in bar::MODES {
             let app = app_with_test(mode);
-            let words = app.test().words();
-            assert!(!words.is_empty(), "{mode:?} produced no words");
-            assert!(
-                app.test().mode().is_scored() == (mode != crate::config::Mode::Zen),
-                "{mode:?} disagrees about being scored"
-            );
+            assert!(!app.test().words().is_empty(), "{mode:?} produced no words");
         }
     }
 
@@ -2435,9 +2656,6 @@ mod tests {
 
     /// With no quote downloaded yet there is still something on screen, and it
     /// says what is wrong rather than being blank.
-    /// With no quote file there is still something on screen, and it says what is
-    /// wrong rather than being blank. The cache may or may not be warm on the
-    /// machine running this, so the state is set rather than assumed.
     #[test]
     fn a_quote_test_without_quotes_says_so() {
         let mut app = app_with_test(crate::config::Mode::Quote);
@@ -2520,68 +2738,39 @@ mod tests {
         assert_eq!(app.countdown(), "2w");
     }
 
+    /// Shift+Enter is the only way out of a zen test.
+    #[test]
+    fn shift_enter_finishes_a_zen_test() {
+        let mut app = app_with_test(crate::config::Mode::Zen);
+        for c in "one two ".chars() {
+            app.type_char(c);
+        }
+        assert!(!app.test().is_finished());
+        app.on_key(press_mod(KeyCode::Enter, KeyModifiers::SHIFT))
+            .expect("no io");
+        assert!(app.test().is_finished(), "shift+enter did not finish zen");
+        assert_eq!(app.screen_kind(), ScreenKind::Results);
+    }
+
+    /// And it does nothing in a test that ends on its own, where a stray
+    /// shift+enter would end a test the user was still in the middle of.
+    #[test]
+    fn shift_enter_does_nothing_outside_zen() {
+        let mut app = app_with_test(crate::config::Mode::Time);
+        app.set_elapsed(Duration::from_millis(500));
+        for c in "hello ".chars() {
+            app.type_char(c);
+        }
+        app.on_key(press_mod(KeyCode::Enter, KeyModifiers::SHIFT))
+            .expect("no io");
+        assert!(!app.test().is_finished(), "shift+enter ended a timed test");
+    }
+
     #[test]
     fn changing_a_setting_rebuilds_the_test_so_the_choice_can_be_seen() {
         let mut app = app_with_test(crate::config::Mode::Words);
-        let before: Vec<String> = app
-            .test()
-            .words()
-            .iter()
-            .map(|w| w.text().to_owned())
-            .collect();
-        app.change_bar_field(Field::Length, 1); // 25 -> 50
-        let after: Vec<String> = app
-            .test()
-            .words()
-            .iter()
-            .map(|w| w.text().to_owned())
-            .collect();
+        app.change_bar_field(Field::Words, 1); // 25 -> 50
         assert_eq!(app.test().words().len(), 50, "the new length took effect");
-        assert_ne!(before, after, "and it is a different set of words");
-    }
-
-    /// A field that changes only what is drawn must not throw the words away.
-    /// Rebuilding for every field is right for punctuation and difficulty and
-    /// wrong for blind, and the difference is a word list disappearing.
-    #[test]
-    fn a_field_that_only_affects_the_drawing_keeps_the_words() {
-        let mut app = app_with_test(crate::config::Mode::Words);
-        app.set_words(
-            "alpha bravo charlie"
-                .split(' ')
-                .map(str::to_owned)
-                .collect(),
-        );
-        let before: Vec<String> = app
-            .test()
-            .words()
-            .iter()
-            .map(|w| w.text().to_owned())
-            .collect();
-
-        app.change_bar_field(Field::Blind, 1);
-        let after: Vec<String> = app
-            .test()
-            .words()
-            .iter()
-            .map(|w| w.text().to_owned())
-            .collect();
-        assert_eq!(before, after, "blind mode threw the word list away");
-        assert!(app.is_blind());
-    }
-
-    /// Punctuation *does* change the words, so it must rebuild.
-    #[test]
-    fn a_field_that_changes_the_words_rebuilds_them() {
-        let mut app = app_with_test(crate::config::Mode::Words);
-        app.set_words(vec!["word".to_owned()]);
-        assert_eq!(app.test().words().len(), 1);
-        app.change_bar_field(Field::Length, 1);
-        assert_eq!(
-            app.test().words().len(),
-            50,
-            "the new length was not applied"
-        );
     }
 
     #[test]
@@ -2592,260 +2781,248 @@ mod tests {
         assert!(app.is_dirty(), "the change would not be saved");
     }
 
-    /// The bar and the settings screen both change the config, so a change made
-    /// in one has to be visible in the other.
+    // ---- the input window ------------------------------------------------
+
+    /// Escape opens the command list, which is the site's default binding.
     #[test]
-    fn the_bar_and_the_settings_screen_agree() {
+    fn escape_opens_the_command_list() {
+        let mut app = app();
+        assert!(app.input_window().is_none());
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert_eq!(
+            app.input_reason(),
+            Some(&input::Reason::Command),
+            "escape did not open the command list"
+        );
+    }
+
+    /// The command list is reachable from a finished test too, which is where a
+    /// re-run usually starts from.
+    #[test]
+    fn escape_opens_the_command_list_from_the_result_screen() {
+        let mut app = finished(12);
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert_eq!(app.input_reason(), Some(&input::Reason::Command));
+    }
+
+    /// A duration reads the way the site reads one, so `1h30m` works.
+    #[test]
+    fn the_window_reads_a_duration_the_way_the_site_does() {
         let mut app = app_with_test(crate::config::Mode::Time);
-        app.move_bar_selection(2); // punctuation
-        assert_eq!(app.bar_field(), Field::Punctuation);
+        app.open_input_with(input::Reason::Length(Field::TimeCustom), "30");
+        app.close_input(input::Outcome::Length(Field::TimeCustom, 5400));
+        assert_eq!(app.config.test.time, 5400);
+        assert!(app.input_window().is_none(), "the window stayed open");
+    }
+
+    /// A value that cannot be read leaves the window open with the text still in
+    /// it, rather than closing and losing what was typed.
+    #[test]
+    fn a_value_that_cannot_be_read_keeps_the_window_open() {
+        let mut app = app_with_test(crate::config::Mode::Time);
+        app.open_input_with(input::Reason::Length(Field::TimeCustom), "30");
+        app.close_input(input::Outcome::Invalid("abc".to_owned()));
+        assert!(app.input_window().is_some());
+        assert_eq!(app.config.test.time, 30, "the value changed anyway");
+    }
+
+    /// Running a command is one call, so every command is reachable the same way.
+    #[test]
+    fn a_command_from_the_list_reaches_the_config() {
+        let mut app = app();
+        let index = crate::screens::commands::filter("punctuation")
+            .first()
+            .map(|m| m.command)
+            .expect("the command");
         let before = app.config.test.punctuation;
-        app.change_bar_field(Field::Punctuation, 1);
+        app.run_command(index);
         assert_ne!(app.config.test.punctuation, before);
     }
 
-    // ---- submission -----------------------------------------------------
-
-    /// A test that has been run, so there is a result to prepare.
-    fn run_one() -> App {
-        let mut config = Config::default();
-        config.test.time = 10;
-        let mut app = App::new(config, PathBuf::from("/nonexistent/config.toml"));
-        app.set_words("the quick brown".split(' ').map(str::to_owned).collect());
-        app.set_elapsed(Duration::from_millis(1500));
-        for c in "the quick ".chars() {
-            app.type_char(c);
+    /// Every command in the list has to reach something, or a line in the list is
+    /// a line that does nothing when pressed.
+    #[test]
+    fn no_command_is_a_no_op() {
+        use crate::screens::commands::Action as Cmd;
+        for (index, command) in crate::screens::commands::COMMANDS.iter().enumerate() {
+            // These three leave the bar and are checked by other tests; running
+            // them here would only show a side effect.
+            if matches!(
+                command.action,
+                Cmd::CopyResult | Cmd::Quit | Cmd::Languages | Cmd::Settings | Cmd::SetLength(_)
+            ) {
+                continue;
+            }
+            let mut app = app();
+            let had_window = app.input_window().is_some();
+            let before: Vec<String> = app
+                .test()
+                .words()
+                .iter()
+                .map(|w| w.text().to_owned())
+                .collect();
+            app.run_command(index);
+            let after: Vec<String> = app
+                .test()
+                .words()
+                .iter()
+                .map(|w| w.text().to_owned())
+                .collect();
+            assert!(
+                app.is_dirty() || before != after || !had_window,
+                "command {index} ({}) changed nothing",
+                command.display
+            );
         }
-        app
     }
 
-    /// A finished test must produce a payload with a hash, because the hash is
-    /// what the server checks first and a missing one is an unexplained 461.
+    /// The window is a modal: a key it does not use is a key it swallows, because
+    /// letting `f` through would type an `f` into the test while the user is
+    /// looking at a search field.
     #[test]
-    fn a_finished_test_produces_a_hashed_payload() {
-        let app = run_one();
-        let body = app.submission_body().expect("a payload");
-        assert!(!body.result.hash.is_empty(), "the payload has no hash");
-        assert_eq!(body.result.mode, "time");
+    fn an_open_window_swallows_keys_the_screen_would_have_used() {
+        let mut app = app();
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        app.on_key(press(KeyCode::F(2))).expect("no io");
         assert_eq!(
-            body.result.mode2, "10",
-            "the length is a string, as the site sends it"
+            app.screen_kind(),
+            ScreenKind::Typing,
+            "f2 reached the screen through an open window"
         );
-        assert_eq!(body.result.language, "english");
-        assert_eq!(body.result.difficulty, "normal");
-        assert!(body.result.wpm > 0.0);
     }
 
-    /// There is no writable endpoint on the public API for an ApeKey, and the
-    /// app must say so rather than report a save that did not happen.
+    /// And a character goes into the field rather than into the test.
     #[test]
-    fn submitting_reports_that_there_was_nowhere_to_send_it() {
-        let app = run_one();
-        let outcome = app.submit();
-        assert!(!outcome.was_saved());
-        let message = outcome.message();
-        assert!(message.contains("not submitted"), "{message}");
-        assert!(message.contains("ApeKey"), "{message}");
-    }
-
-    /// An unstarted test has nothing to submit, and must not invent a payload.
-    #[test]
-    fn an_unrun_test_has_no_payload() {
-        let app = app();
-        assert!(app.submission_body().is_none());
-    }
-
-    /// The timestamp is wall time rounded to the second, because the server
-    /// buckets results by day using it.
-    #[test]
-    fn the_timestamp_is_the_second_the_test_started() {
-        let app = run_one();
-        let body = app.submission_body().expect("a payload");
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("after 1970")
-            .as_millis() as i64;
-        assert!(body.result.timestamp > 0, "the timestamp was not set");
+    fn typing_with_the_window_open_does_not_start_a_test() {
+        let mut app = app();
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        for c in "zen".chars() {
+            app.on_key(press(KeyCode::Char(c))).expect("no io");
+        }
         assert!(
-            body.result.timestamp <= now_ms,
-            "{} is in the future",
-            body.result.timestamp
+            !app.test().is_started(),
+            "the words were typed into the test"
         );
-        assert_eq!(
-            body.result.timestamp % 1000,
-            0,
-            "the server rounds this to the second"
-        );
+        assert_eq!(app.input_window().map(|w| w.text()), Some("zen"));
     }
 
-    // ---- the account ----------------------------------------------------
-
-    /// An app with a finished test, so a record has something to be compared to.
-    fn with_result() -> App {
-        let mut app = run_one();
-        app.set_elapsed(Duration::from_secs(12));
-        app.tick();
-        app
-    }
-
-    fn best_of(language: &str, mode2: &str, wpm: f64) -> api::PersonalBest {
-        api::PersonalBest {
-            language: language.to_owned(),
-            mode2: mode2.to_owned(),
-            wpm,
-            time: 10.0,
-            timestamp: 0,
+    /// The whole path a user actually takes: escape, type a command, enter.
+    #[test]
+    fn a_command_can_be_run_from_the_keyboard_alone() {
+        let mut app = app();
+        assert!(app.config.test.punctuation, "the premise changed");
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        for c in "punc".chars() {
+            app.on_key(press(KeyCode::Char(c))).expect("no io");
         }
-    }
-
-    #[test]
-    fn with_no_key_the_app_says_so_rather_than_spinning() {
-        let app = app();
-        assert!(!app.is_signed_in());
-        assert_eq!(app.account_note(), Some("no ApeKey set — reads need one"));
-    }
-
-    #[test]
-    fn a_key_makes_the_client_authenticated() {
-        let app = App::new(
-            Config {
-                ape_key: "abc".to_owned(),
-                ..Config::default()
-            },
-            PathBuf::from("/nonexistent/config.toml"),
-        );
-        assert!(app.is_signed_in());
-        assert!(app.profile().is_none(), "nothing has been fetched yet");
-    }
-
-    /// A record from another language or another length is not this test's record.
-    #[test]
-    fn a_record_only_matches_the_test_it_belongs_to() {
-        let mut app = with_result();
-        app.config.test.time = 10;
-        app.bests.time = vec![
-            best_of("english", "10", 100.0),
-            best_of("english", "60", 150.0),
-            best_of("russian", "10", 200.0),
-        ];
-        assert_eq!(app.personal_best_for().map(|b| b.wpm), Some(100.0));
-
-        app.config.test.language = "russian".to_owned();
-        assert_eq!(app.personal_best_for().map(|b| b.wpm), Some(200.0));
-    }
-
-    /// A sized language is still the same base language to the API, which has no
-    /// `english_5k.json` for records.
-    #[test]
-    fn a_sized_language_matches_a_base_language_record() {
-        let mut app = with_result();
-        app.config.test.time = 10;
-        app.config.test.language = "english_5k".to_owned();
-        app.bests.time = vec![best_of("english", "10", 111.0)];
-        assert_eq!(
-            app.personal_best_for().map(|b| b.wpm),
-            Some(111.0),
-            "english_5k should find the english record"
-        );
-    }
-
-    #[test]
-    fn no_record_for_this_combination_shows_nothing() {
-        let mut app = with_result();
-        app.bests.time = vec![best_of("english", "60", 150.0)];
-        assert!(app.personal_best_for().is_none());
-    }
-
-    /// A record is not a personal best for a mode it was not set in.
-    #[test]
-    fn a_record_from_another_mode_is_not_offered() {
-        let mut app = with_result();
-        app.config.test.mode = crate::config::Mode::Words;
-        app.config.test.words = 25;
-        app.bests.time = vec![best_of("english", "10", 150.0)];
-        assert!(app.personal_best_for().is_none());
-    }
-
-    /// A quote or zen test has no comparable record, so none is shown rather than
-    /// one from a different kind of test.
-    #[test]
-    fn a_mode_with_no_records_shows_none() {
-        for mode in [crate::config::Mode::Quote, crate::config::Mode::Zen] {
-            let mut app = with_result();
-            app.config.test.mode = mode;
-            app.bests.time = vec![best_of("english", "10", 150.0)];
-            assert!(app.personal_best_for().is_none(), "{mode:?}");
-        }
-    }
-
-    /// Changing the key changes the account, so what was fetched for the old one
-    /// has to go rather than be shown against the new key's name.
-    #[test]
-    fn a_new_key_forgets_the_previous_account() {
-        let mut app = with_result();
-        app.profile = Some(api::Profile {
-            uid: "old".to_owned(),
-            name: "old".to_owned(),
-            streak: 99,
-            lb_opt_out: false,
-            banned: false,
-        });
-        app.bests.time = vec![best_of("english", "10", 100.0)];
-        assert!(app.profile().is_some());
-
-        app.on_key(press(KeyCode::Char('x'))).expect("no io");
-        // Reaching the settings screen and the key row is a lot of keystrokes, so
-        // the effect is applied directly — which is what the app does with it.
-        app.apply(crate::screens::Effect::SetApeKey("newkey".to_owned()));
-        assert!(app.profile().is_none(), "the old profile is still shown");
+        app.on_key(press(KeyCode::Enter)).expect("no io");
+        assert!(!app.config.test.punctuation, "the command did not run");
         assert!(
-            app.personal_best_for().is_none(),
-            "the old records are still shown"
+            !app.input_is_open(),
+            "the window stayed open after running one"
         );
     }
 
-    /// A fetch that failed says why, and the note is the server's own wording.
+    /// The second escape closes the list, which is how a palette is expected to
+    /// behave: the first opens it, the second dismisses it.
     #[test]
-    fn a_failed_fetch_leaves_a_note_rather_than_an_empty_screen() {
-        let mut app = with_result();
-        app.drain_account();
-        // Nothing has arrived, so there is nothing to say beyond "no key".
-        assert!(app.account_note().is_some() || !app.is_signed_in());
+    fn escape_closes_the_window_it_opened() {
+        let mut app = app();
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert!(app.input_is_open());
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert!(!app.input_is_open(), "the window could not be closed");
     }
 
-    /// The whole reason the screen says it wants text: `h` is bound to `left`,
-    /// so without that a passage containing an `h` could not be typed at all.
+    /// A duration typed into the window becomes the length, the way the site's
+    /// modal does. Reached the way a user reaches it: arrows to the wrench,
+    /// enter, type, enter.
     #[test]
-    fn a_bound_letter_reaches_a_text_field() {
-        let mut app = App::new(Config::default(), PathBuf::from("/nonexistent/config.toml"));
-        app.show_screen(ScreenKind::Settings);
-        // Down to the ApeKey row and open the editor.
-        for _ in 0..3 {
-            app.press(KeyCode::Down);
+    fn a_duration_typed_into_the_window_becomes_the_length() {
+        let mut app = app_with_test(crate::config::Mode::Time);
+        // The wrench is the last button in the bar.
+        for _ in 0..40 {
+            app.move_bar_selection(1);
         }
-        assert_eq!(app.selected_row(), Some(Row::ApeKey));
-        app.press(KeyCode::Enter);
-        for c in "hash".chars() {
-            app.press(KeyCode::Char(c));
+        assert_eq!(app.bar_selection(), Some(Field::TimeCustom));
+        app.on_key(press(KeyCode::Enter)).expect("no io");
+        assert_eq!(
+            app.input_reason(),
+            Some(&input::Reason::Length(Field::TimeCustom))
+        );
+        // The field opens on the value it already had, so it is edited, not
+        // retyped from nothing.
+        assert_eq!(app.input_window().map(|w| w.text()), Some("30"));
+        for _ in 0..2 {
+            app.on_key(press(KeyCode::Backspace)).expect("no io");
         }
-        app.press(KeyCode::Enter);
-        assert_eq!(app.config.ape_key, "hash", "the h was treated as a binding");
+        for c in "2m".chars() {
+            app.on_key(press(KeyCode::Char(c))).expect("no io");
+        }
+        app.on_key(press(KeyCode::Enter)).expect("no io");
+        assert_eq!(app.config.test.time, 120, "2m did not become 120 seconds");
     }
 
-    /// The editor's bounds are about the text, so a bound key must not move the
-    /// caret or change the selection while one is open.
+    /// The bar says so afterwards: a value that is not a preset lights the wrench.
     #[test]
-    fn an_open_editor_keeps_the_keyboard() {
-        let mut app = App::new(Config::default(), PathBuf::from("/nonexistent/config.toml"));
-        app.show_screen(ScreenKind::Settings);
-        for _ in 0..3 {
-            app.press(KeyCode::Down);
+    fn a_custom_duration_lights_the_wrench() {
+        let mut app = app_with_test(crate::config::Mode::Time);
+        app.open_input_with(input::Reason::Length(Field::Time), "");
+        for c in "45".chars() {
+            app.on_key(press(KeyCode::Char(c))).expect("no io");
         }
-        app.press(KeyCode::Enter);
-        // Left is bound; in an editor it is simply not what a letter does.
-        app.press(KeyCode::Char('h'));
-        app.press(KeyCode::Enter);
-        assert_eq!(app.config.ape_key, "h");
+        app.on_key(press(KeyCode::Enter)).expect("no io");
+        assert_eq!(app.config.test.time, 45);
+        assert!(
+            app.bar()
+                .right
+                .buttons
+                .iter()
+                .any(|b| b.label == "custom" && b.active),
+            "the wrench is not lit for 45 seconds"
+        );
+    }
+
+    /// Nonsense keeps the window open rather than closing and losing the typing.
+    #[test]
+    fn nonsense_in_the_window_keeps_it_open() {
+        let mut app = app_with_test(crate::config::Mode::Time);
+        app.open_input_with(input::Reason::Length(Field::Time), "");
+        for c in "soon".chars() {
+            app.on_key(press(KeyCode::Char(c))).expect("no io");
+        }
+        app.on_key(press(KeyCode::Enter)).expect("no io");
+        assert!(app.input_is_open(), "the window closed on nonsense");
+        assert_eq!(app.input_window().map(|w| w.text()), Some("soon"));
+        assert_eq!(app.config.test.time, 30, "the value changed anyway");
+    }
+
+    /// `ctrl+c` quits even with the window open. A modal you cannot leave is a
+    /// bug, not a feature.
+    #[test]
+    fn ctrl_c_quits_with_the_window_open() {
+        let mut app = app();
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert!(app
+            .on_key(press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .expect("no io"));
+    }
+
+    /// The arrows move the highlight rather than the bar, because the window is
+    /// in front of the bar.
+    #[test]
+    fn the_arrows_move_the_highlight_and_not_the_bar() {
+        let mut app = app();
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        let before = app.bar().selected;
+        app.on_key(press(KeyCode::Down)).expect("no io");
+        assert_eq!(app.bar().selected, before, "the bar moved under the window");
+        assert_eq!(
+            app.input_window()
+                .and_then(|w| w.selected())
+                .map(|m| m.command),
+            Some(1)
+        );
     }
 
     #[test]

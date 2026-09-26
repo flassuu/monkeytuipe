@@ -46,54 +46,47 @@ pub fn on_off(value: bool) -> String {
 }
 
 /// One selectable field of the bar.
+///
+/// These are the website's own fields, in the order its three cards hold them:
+/// the toggles on the left, the mode in the middle, and whatever the mode's
+/// length is called on the right. `TimeCustom` and `WordsCustom` are the wrench
+/// button rather than a preset — it opens the input window, which is a different
+/// action from stepping to the next preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
-    /// What kind of test: time, words, quote, zen or custom.
-    Mode,
-    /// How long: seconds for a timed test, words for a word-count or passage one.
-    Length,
-    /// Quote length, which replaces [`Field::Length`] in quote mode.
-    QuoteLength,
     Punctuation,
     Numbers,
-    Difficulty,
-    /// Free text: the passage to type.
+    Mode,
+    /// One of the preset durations.
+    Time,
+    /// The wrench: set a duration of any length.
+    TimeCustom,
+    /// One of the preset word counts.
+    Words,
+    /// The wrench: set a word count of any size.
+    WordsCustom,
+    QuoteLength,
+    /// A passage of the user's own.
     CustomText,
-    Language,
-    Blind,
 }
 
 impl Field {
-    /// The bar's own label, as the website writes it.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Mode => "",
-            Self::Length => "",
-            Self::QuoteLength => "quote",
-            Self::Punctuation => "punctuation",
-            Self::Numbers => "numbers",
-            Self::Difficulty => "difficulty",
-            Self::CustomText => "custom",
-            Self::Language => "language",
-            Self::Blind => "blind",
-        }
-    }
-
-    /// Whether this field has a value of its own to show, or only a name.
+    /// Whether picking this field needs the input window rather than a step.
     ///
-    /// The mode and the length are shown as the value alone — `time 30s`, not
-    /// `mode: time` — because on the website they are the first two buttons and
-    /// labelling them would only add noise.
-    pub fn is_value_only(self) -> bool {
-        matches!(self, Self::Mode | Self::Length)
+    /// A preset cycles; a wrench opens a dialog. Treating them as the same thing
+    /// is how a "custom" button ends up cycling to nothing.
+    pub fn needs_input(self) -> bool {
+        matches!(
+            self,
+            Self::TimeCustom | Self::WordsCustom | Self::CustomText
+        )
     }
 }
 
-/// The word-list sizes, in the order the bar cycles them.
+/// The word-list sizes, in the order the settings browser's columns go.
 ///
 /// Re-exported from [`crate::words::variants`] rather than duplicated, so the
-/// browser's columns and the bar's cycle cannot drift apart — which would show a
-/// size in the picker that the bar then steps past.
+/// browser's columns and the picker cannot drift apart.
 pub use crate::words::variants::SIZES as variants_sizes;
 
 /// The modes, in the website's order.
@@ -105,10 +98,10 @@ pub const MODES: [Mode; 5] = [
     Mode::Custom,
 ];
 
-/// Test lengths, in seconds, in the website's order plus two that a terminal
-/// test can actually be run at: a 15-second test over a 200-word list is 20 words
-/// and a 5-minute one is a chart you can read.
-pub const TIMES: [u32; 6] = [15, 30, 60, 120, 180, 300];
+/// Test lengths, in seconds. The website's four, exactly: anything else is what
+/// the wrench is for, and a longer list would make "custom" mean something
+/// different here than it does there.
+pub const TIMES: [u32; 4] = [15, 30, 60, 120];
 
 /// Test lengths, in words, in the website's order.
 pub const WORD_COUNTS: [u32; 4] = [10, 25, 50, 100];
@@ -219,190 +212,9 @@ impl LengthUnit {
     }
 }
 
-/// Where the bar is: which field is selected, and whether it has the keyboard.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Bar {
-    selected: usize,
-    focused: bool,
-}
-
-impl Bar {
-    /// A bar that is on screen but not selected, so nothing on it reacts to a key.
-    pub fn idle() -> Self {
-        Self::default()
-    }
-
-    /// A bar with the keyboard, on the first field.
-    pub fn focused() -> Self {
-        Self {
-            selected: 0,
-            focused: true,
-        }
-    }
-
-    pub fn is_focused(&self) -> bool {
-        self.focused
-    }
-
-    /// The index of the selected field within [`Self::fields`].
-    pub fn selected(&self) -> usize {
-        self.selected
-    }
-
-    /// Moves the selection, clamping rather than wrapping.
-    ///
-    /// Clamping rather than wrapping is the point: the bar has an order, and a
-    /// selection that jumps from the last field back to the first is a selection
-    /// you have lost.
-    pub fn move_selection(&mut self, by: isize, len: usize) {
-        if len == 0 {
-            return;
-        }
-        let last = len as isize - 1;
-        let next = (self.selected as isize + by).clamp(0, last);
-        self.selected = next as usize;
-    }
-
-    /// Selects a field by index, ignoring anything out of range.
-    pub fn select(&mut self, index: usize) {
-        self.selected = index;
-    }
-
-    pub fn focus(&mut self) {
-        self.focused = true;
-    }
-
-    pub fn blur(&mut self) {
-        self.focused = false;
-    }
-
-    /// The fields that apply to the current mode, in the website's order.
-    ///
-    /// This is the rule that makes the bar look like the site: the mode comes
-    /// first, then whatever stands in for a length, and only then the modifiers.
-    /// Punctuation, numbers, difficulty and language are all dropped in the modes
-    /// where they would have nothing to act on, rather than being shown disabled —
-    /// the site greys them out, but a bar is too short for a greyed-out control to
-    /// read as anything but a mistake.
-    pub fn fields(mode: Mode) -> Vec<Field> {
-        let mut fields = vec![Field::Mode];
-        match mode {
-            Mode::Time | Mode::Words => fields.push(Field::Length),
-            Mode::Quote => fields.push(Field::QuoteLength),
-            Mode::Custom => fields.push(Field::CustomText),
-            Mode::Zen => {}
-        }
-        match mode {
-            Mode::Time | Mode::Words => {
-                fields.extend([
-                    Field::Punctuation,
-                    Field::Numbers,
-                    Field::Difficulty,
-                    Field::Language,
-                ]);
-            }
-            // A passage is already punctuated and is not made of the generator's
-            // words, and zen has no target to be right or wrong about.
-            Mode::Quote | Mode::Custom | Mode::Zen => {}
-        }
-        fields.push(Field::Blind);
-        fields
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_word_test_offers_everything_the_generator_can_do() {
-        let fields = Bar::fields(Mode::Words);
-        assert_eq!(
-            fields,
-            [
-                Field::Mode,
-                Field::Length,
-                Field::Punctuation,
-                Field::Numbers,
-                Field::Difficulty,
-                Field::Language,
-                Field::Blind
-            ]
-        );
-    }
-
-    /// The site's rule: no punctuation or language buttons in quote mode.
-    #[test]
-    fn a_quote_offers_only_its_length() {
-        assert_eq!(
-            Bar::fields(Mode::Quote),
-            [Field::Mode, Field::QuoteLength, Field::Blind]
-        );
-    }
-
-    #[test]
-    fn a_zen_test_offers_almost_nothing() {
-        // No length, because zen does not end, and nothing to modify, because
-        // there is no target.
-        assert_eq!(Bar::fields(Mode::Zen), [Field::Mode, Field::Blind]);
-    }
-
-    #[test]
-    fn a_custom_test_offers_its_text_and_nothing_else() {
-        assert_eq!(
-            Bar::fields(Mode::Custom),
-            [Field::Mode, Field::CustomText, Field::Blind]
-        );
-    }
-
-    #[test]
-    fn the_mode_is_always_the_first_field() {
-        for mode in MODES {
-            assert_eq!(
-                Bar::fields(mode).first(),
-                Some(&Field::Mode),
-                "{mode:?} does not start with the mode"
-            );
-        }
-    }
-
-    #[test]
-    fn blind_is_always_the_last_field() {
-        for mode in MODES {
-            assert_eq!(
-                Bar::fields(mode).last(),
-                Some(&Field::Blind),
-                "{mode:?} does not end with blind"
-            );
-        }
-    }
-
-    /// The selection must stay inside the bar as the mode changes the bar's
-    /// shape, or changing mode leaves nothing selected.
-    #[test]
-    fn a_selection_never_points_past_the_end() {
-        let mut bar = Bar::focused();
-        for _ in 0..20 {
-            bar.move_selection(1, Bar::fields(Mode::Time).len());
-        }
-        assert_eq!(bar.selected(), Bar::fields(Mode::Time).len() - 1);
-    }
-
-    #[test]
-    fn the_selection_stops_at_both_ends() {
-        let mut bar = Bar::focused();
-        for _ in 0..5 {
-            bar.move_selection(-1, 7);
-        }
-        assert_eq!(bar.selected(), 0, "it went off the left edge");
-    }
-
-    #[test]
-    fn an_empty_bar_cannot_be_moved() {
-        let mut bar = Bar::focused();
-        bar.move_selection(1, 0);
-        assert_eq!(bar.selected(), 0);
-    }
 
     #[test]
     fn quote_lengths_are_the_websites_buckets() {

@@ -26,4 +26,8 @@ pub enum Action {
     Backspace,
     /// Jump over the active word without scoring it.
     Skip,
+    /// Open the command list. Escape, on the website.
+    Command,
+    /// Finish a zen test. Shift+Enter, on the website.
+    Finish,
 }

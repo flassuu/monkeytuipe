@@ -83,22 +83,33 @@ fn the_typing_screen_draws_its_header_and_counters() {
     let header = area_text(&buffer, rows.header);
     assert!(header.contains("monkeytuipe"), "no title in {header:?}");
 
-    // The settings bar: the fields the website puts above the words, and the
-    // one the user has selected.
+    // The top bar: the three cards the website puts above the words, in its
+    // order — the toggles, the five modes, then the length for a timed test.
     let bar = area_text(&buffer, rows.bar);
     for field in [
-        "time",
         "punctuation",
         "numbers",
-        "difficulty",
-        "language",
-        "blind",
+        "time",
+        "words",
+        "quote",
+        "zen",
+        "custom",
+        "15",
+        "30",
+        "60",
+        "120",
     ] {
         assert!(
             bar.contains(field),
             "{field:?} missing from the bar: {bar:?}"
         );
     }
+    // And in that order, because the cards are laid out left to right.
+    let at = |needle: &str| bar.find(needle).unwrap_or_else(|| panic!("no {needle}"));
+    assert!(at("punctuation") < at("numbers"), "{bar:?}");
+    assert!(at("numbers") < at("time"), "{bar:?}");
+    assert!(at("zen") < at("custom"), "{bar:?}");
+    assert!(at("custom") < at("15"), "{bar:?}");
 
     let counters = area_text(&buffer, rows.counters);
     for expected in ["wpm", "acc", "time", "ctrl+c quit"] {
@@ -521,6 +532,9 @@ fn the_results_screen_survives_a_tiny_terminal() {
 /// Blind mode shows only the word being typed, so the test is about reading ahead
 /// rather than recall. A setting that does nothing on screen is worse than no
 /// setting at all, so this checks it actually hides the words.
+///
+/// Reached through the command list, which is the only way a user gets there:
+/// the bar has no blind button, because neither does the site's.
 #[test]
 fn blind_mode_shows_only_the_active_word() {
     let mut app = app();
@@ -537,21 +551,12 @@ fn blind_mode_shows_only_the_active_word() {
         "{whole:?}"
     );
 
-    // Turn it on through the bar, the way the user would: walk the selection to
-    // the end and come back until the field is found. Bounded, so a bar that
-    // never offers the field fails the test instead of hanging it.
-    app.move_bar_selection(100);
-    let mut steps = 0;
-    while app.bar_field() != monkeytuipe::config::Field::Blind && steps < 32 {
-        app.move_bar_selection(-1);
-        steps += 1;
-    }
-    assert_eq!(
-        app.bar_field(),
-        monkeytuipe::config::Field::Blind,
-        "no blind field"
-    );
-    app.change_bar_field(app.bar_field(), 1);
+    // Turn it on through the command list, the way the user would: escape, type.
+    let index = monkeytuipe::screens::commands::filter("blind")
+        .first()
+        .map(|m| m.command)
+        .expect("a blind command in the list");
+    app.run_command(index);
     assert!(app.is_blind());
 
     let buffer = render(&app, 60, 20);
@@ -566,4 +571,308 @@ fn blind_mode_shows_only_the_active_word() {
             "{hidden} is still visible in blind mode: {blind:?}"
         );
     }
+}
+
+// ---- the top bar --------------------------------------------------------
+
+/// An app pinned to one mode, with its word list under control.
+fn in_mode(mode: monkeytuipe::config::Mode) -> App {
+    let mut config = Config::default();
+    config.test.mode = mode;
+    let mut app = App::new(config, PathBuf::from("/nonexistent/config.toml"));
+    app.set_words(
+        "the child become possible point face back the here however not still any because"
+            .split(' ')
+            .map(str::to_owned)
+            .collect(),
+    );
+    app
+}
+
+/// The bar's own row, which is the row the layout gives it.
+fn bar_row(app: &App, buffer: &Buffer) -> String {
+    area_text(buffer, layout_of(app, buffer).bar)
+}
+
+/// Every mode draws a whole bar, with nothing missing off the right edge.
+///
+/// Quote mode is the tightest: its right card is as wide as the mode card, so it
+/// is the one that cannot be centred in 80 columns and falls back to being packed
+/// against the left edge. It still has to be *there*.
+#[test]
+fn every_mode_draws_a_complete_bar_in_eighty_columns() {
+    for mode in [
+        monkeytuipe::config::Mode::Time,
+        monkeytuipe::config::Mode::Words,
+        monkeytuipe::config::Mode::Quote,
+        monkeytuipe::config::Mode::Zen,
+        monkeytuipe::config::Mode::Custom,
+    ] {
+        let app = in_mode(mode);
+        let buffer = render(&app, 80, 20);
+        let bar = bar_row(&app, &buffer);
+        for expected in ["time", "words", "quote", "zen", "custom"] {
+            assert!(
+                bar.contains(expected),
+                "{mode:?} bar is missing {expected:?}: {bar:?}"
+            );
+        }
+        match mode {
+            monkeytuipe::config::Mode::Zen => {
+                assert!(!bar.contains("punctuation"), "zen has a left card: {bar:?}");
+                assert!(!bar.contains("thicc"), "zen has a right card: {bar:?}");
+            }
+            monkeytuipe::config::Mode::Quote => {
+                for length in ["all", "short", "medium", "long", "thicc"] {
+                    assert!(
+                        bar.contains(length),
+                        "{mode:?} bar is missing {length:?}: {bar:?}"
+                    );
+                }
+            }
+            monkeytuipe::config::Mode::Custom => assert!(bar.contains("add"), "{bar:?}"),
+            _ => {
+                for toggles in ["punctuation", "numbers"] {
+                    assert!(
+                        bar.contains(toggles),
+                        "{mode:?} bar is missing {toggles:?}: {bar:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The cards are separate things, with something between them. Three runs of text
+/// with nothing in the gaps read as one sentence, and the grouping is the thing
+/// being copied from the site.
+#[test]
+fn the_cards_are_separated_by_something() {
+    let app = in_mode(monkeytuipe::config::Mode::Time);
+    let buffer = render(&app, 80, 20);
+    let bar = bar_row(&app, &buffer);
+    for boundary in ["numbers", "custom"] {
+        let at = bar
+            .find(boundary)
+            .unwrap_or_else(|| panic!("no {boundary}"));
+        let after = &bar[at + boundary.len()..];
+        assert!(
+            after.starts_with("  "),
+            "nothing between {boundary:?} and the next card: {bar:?}"
+        );
+    }
+}
+
+/// A pressed button is a fill, not a hue shift. A hue shift is invisible on a
+/// monochrome terminal and a fill is not, which is the whole reason for doing it
+/// this way round.
+#[test]
+fn the_active_mode_is_drawn_as_a_fill() {
+    let app = in_mode(monkeytuipe::config::Mode::Time);
+    let buffer = render(&app, 80, 20);
+    let bar = layout_of(&app, &buffer).bar;
+    let theme = app.theme();
+    let at = |needle: &str| -> (u16, u16) {
+        let row = area_text(&buffer, bar);
+        let column = row.find(needle).unwrap_or_else(|| panic!("no {needle}")) as u16;
+        (column, bar.y)
+    };
+    // The active mode is filled with the accent; an inactive one is not filled at
+    // all.
+    let (x, y) = at("time");
+    assert_eq!(
+        buffer[(x, y)].bg,
+        theme.accent,
+        "the active mode is not filled"
+    );
+    let (x, y) = at("zen");
+    assert_ne!(
+        buffer[(x, y)].bg,
+        theme.accent,
+        "an inactive mode is filled"
+    );
+}
+
+/// The bars of two different modes put the mode card in the same place, as long
+/// as the bar can be centred. The `1fr auto 1fr` grid does this, and it is why
+/// the bar feels like a bar rather than a list that rewraps.
+#[test]
+fn the_mode_card_does_not_move_between_modes_that_fit_centred() {
+    let offset = |mode| -> usize {
+        let app = in_mode(mode);
+        let buffer = render(&app, 120, 20);
+        let bar = bar_row(&app, &buffer);
+        bar.find("time words")
+            .unwrap_or_else(|| panic!("no mode card in {bar:?}"))
+    };
+    let a = offset(monkeytuipe::config::Mode::Time);
+    let b = offset(monkeytuipe::config::Mode::Words);
+    let c = offset(monkeytuipe::config::Mode::Custom);
+    assert_eq!(a, b, "the modes moved between time and words");
+    assert_eq!(a, c, "the modes moved between time and custom");
+}
+
+/// Below the width the bar needs there is no bar at all rather than half of one.
+/// The words and the counters are the test; the bar is a convenience.
+#[test]
+fn a_narrow_terminal_gets_no_bar_rather_than_a_broken_one() {
+    let app = in_mode(monkeytuipe::config::Mode::Time);
+    let buffer = render(&app, 40, 20);
+    let bar = bar_row(&app, &buffer);
+    assert!(bar.trim().is_empty(), "a 40-column bar was drawn: {bar:?}");
+    assert!(bar_rows(&app, 40) == 0, "but a row was reserved for it");
+}
+
+// ---- the input window ---------------------------------------------------
+
+/// The command window, opened and searched, as a user would.
+fn commands_window(query: &str) -> (App, Buffer) {
+    let mut app = in_mode(monkeytuipe::config::Mode::Time);
+    app.press(KeyCode::Esc);
+    for c in query.chars() {
+        app.press(KeyCode::Char(c));
+    }
+    let buffer = render(&app, 80, 24);
+    (app, buffer)
+}
+
+#[test]
+fn the_command_window_draws_the_list_it_found() {
+    let (_app, buffer) = commands_window("th");
+    let text = lines(&buffer).join("\n");
+    assert!(text.contains("commands"), "the window has no title: {text}");
+    assert!(
+        text.contains("next theme"),
+        "the first match is missing: {text}"
+    );
+    assert!(
+        text.contains("type to search"),
+        "the hint is missing: {text}"
+    );
+}
+
+#[test]
+fn the_command_window_says_when_nothing_matched() {
+    let (_app, buffer) = commands_window("qwertyuiop");
+    let text = lines(&buffer).join("\n");
+    assert!(text.contains("commands"), "{text}");
+    // The field still holds the query, so it can be corrected rather than retyped.
+    assert!(text.contains("qwertyuiop"), "{text}");
+}
+
+/// The window is drawn over the words, opaquely. A box with the words legible
+/// through it is harder to read than one without.
+#[test]
+fn the_window_covers_what_is_under_it() {
+    let mut app = in_mode(monkeytuipe::config::Mode::Time);
+    let before = render(&app, 80, 24);
+    app.press(KeyCode::Esc);
+    let after = render(&app, 80, 24);
+    assert_ne!(
+        before, after,
+        "opening the window changed nothing on screen"
+    );
+    let mut changed = 0;
+    for y in 0..24u16 {
+        for x in 0..80u16 {
+            if before[(x, y)] != after[(x, y)] {
+                changed += 1;
+            }
+        }
+    }
+    assert!(
+        changed > 40,
+        "only {changed} cells changed; the window is a sliver"
+    );
+}
+
+// ---- zen ----------------------------------------------------------------
+
+/// Zen has no target: it shows what was typed and marks nothing as wrong.
+///
+/// This is the part of zen that is not a word test at all, and it is the part a
+/// user notices first — a zen that shows the word list and colours it is just a
+/// normal test with the length removed.
+#[test]
+fn zen_shows_what_was_typed_and_nothing_that_was_not() {
+    let mut app = in_mode(monkeytuipe::config::Mode::Zen);
+    app.set_elapsed(Duration::from_millis(400));
+    for c in "hello wrld ".chars() {
+        app.type_char(c);
+    }
+    app.set_elapsed(Duration::from_millis(2400));
+    let buffer = render(&app, 80, 20);
+    let words = word_area(&buffer, &app);
+    assert!(words.contains("hello"), "{words:?}");
+    assert!(words.contains("wrld"), "{words:?}");
+    // The generated target is nowhere in sight.
+    assert!(
+        !words.contains("become"),
+        "zen showed its target words: {words:?}"
+    );
+
+    // Only the word pane. The chart draws its falling edge in the error colour,
+    // which is correct there, so looking at the whole screen would count it.
+    let theme = app.theme();
+    let pane = layout_of(&app, &buffer).words;
+    let mut reds = String::new();
+    for y in pane.y..pane.y + pane.height {
+        for x in pane.x..pane.x + pane.width {
+            if buffer[(x, y)].fg == theme.incorrect {
+                reds.push_str(buffer[(x, y)].symbol());
+            }
+        }
+    }
+    assert_eq!(reds, "", "zen marked these as wrong: {reds:?}");
+}
+
+// ---- the thing that was reported as a bug ------------------------------
+
+/// A word that was typed correctly is not drawn in the error colour.
+///
+/// Reported as "finished words light up red, even correct ones". The engine and
+/// the renderer both turned out to be right, so this pins the behaviour from the
+/// outside: if it ever comes back, this is the test that says so.
+#[test]
+fn a_correctly_typed_word_is_not_drawn_in_the_error_colour() {
+    let mut app = in_mode(monkeytuipe::config::Mode::Time);
+    app.set_elapsed(Duration::from_millis(300));
+    for c in "the child ".chars() {
+        app.type_char(c);
+    }
+    app.set_elapsed(Duration::from_millis(1900));
+    // One wrong word, so the test would notice a red that is not its own.
+    for c in "bxcome ".chars() {
+        app.type_char(c);
+    }
+    let buffer = render(&app, 80, 20);
+    let theme = app.theme();
+    let words = layout_of(&app, &buffer).words;
+
+    let mut red = String::new();
+    let mut green = String::new();
+    for y in words.y..words.y + words.height {
+        for x in words.x..words.x + words.width {
+            let cell = &buffer[(x, y)];
+            if cell.fg == theme.incorrect {
+                red.push_str(cell.symbol());
+            } else if cell.fg == theme.correct {
+                green.push_str(cell.symbol());
+            }
+        }
+    }
+    assert!(
+        green.contains("child"),
+        "the correct word is not drawn correct: {green:?}"
+    );
+    assert!(
+        green.contains("the"),
+        "the first correct word is not drawn correct: {green:?}"
+    );
+    // Exactly the word that was mistyped, and nothing else. A red anywhere else
+    // in the line is the bug this test exists for.
+    assert_eq!(
+        red, "become",
+        "the wrong characters are not exactly the wrong word"
+    );
 }

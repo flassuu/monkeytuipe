@@ -16,7 +16,7 @@ use crate::action::Action;
 use crate::app::App;
 use crate::config::theme::Theme;
 use crate::engine::{Word, WordState};
-use crate::screens::{config_bar, Effect, Screen, ScreenKind};
+use crate::screens::{topbar, Effect, Screen, ScreenKind};
 use crate::widgets;
 
 /// How many rows the live chart takes on the typing screen.
@@ -119,7 +119,7 @@ impl Screen for Typing {
 
         let rows = rows_for(frame.area(), bar_rows(app, frame.area().width));
         render_header(app, frame, rows.header, theme);
-        config_bar::render(app, rows.bar, theme, frame);
+        topbar::render(app, rows.bar, theme, frame);
         render_words(app, frame, rows.words, theme);
         render_chart(app, frame, rows.chart, theme);
         render_counters(app, frame, rows.counters, theme);
@@ -141,24 +141,32 @@ impl Screen for Typing {
             Action::Down => vec![Effect::ChangeBar(1)],
             Action::Left => vec![Effect::MoveBar(-1)],
             Action::Right => vec![Effect::MoveBar(1)],
-            // Enter and Escape are the settings screen's; there is nothing to
-            // confirm here because every change takes effect immediately.
-            Action::Select | Action::Back => Vec::new(),
+            // Enter presses the selected bar button and every change takes effect
+            // immediately, so there is nothing to confirm.
+            Action::Select => vec![Effect::PressBar],
+            // Escape opens the command list, which is what it is bound to on the
+            // site when `quickRestart` is off — the default.
+            Action::Back | Action::Command => vec![Effect::OpenCommands],
+            // Shift+Enter ends a zen test, which is the only way out of one: it
+            // has no length, so there is nothing to run out of.
+            Action::Finish => vec![Effect::FinishTest],
         }
     }
 }
 
-/// How many rows the settings bar needs at this width.
+/// How many rows the top bar needs at this width.
+///
+/// One, or none: the bar is a single row on the site and a wrapped one is two
+/// things to read rather than one. A terminal too narrow for it gets no bar,
+/// which is a trade worth making — the words and the counters are the test.
 ///
 /// Public so a test can ask the same question the screen does: a test that
 /// assumed one row would be checking a layout the screen never draws.
 pub fn bar_rows(app: &App, width: u16) -> u16 {
-    let cells = config_bar::cells(app);
-    if cells.is_empty() || width == 0 {
+    if width == 0 {
         return 0;
     }
-    (config_bar::layout(&cells, width as usize, u16::MAX as usize).len() as u16)
-        .min(config_bar::ROWS)
+    u16::from(topbar::fits(app, width))
 }
 
 /// The name on the left, whatever is downloading on the right.
@@ -260,7 +268,20 @@ fn render_words(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
     if shown.is_empty() {
         return;
     }
-    let widths: Vec<usize> = shown.iter().map(|w| w.text().chars().count()).collect();
+    // Zen shows what was typed, not what was there to type: there is no target
+    // and nothing to be wrong about. The wrapping has to measure the same thing
+    // it draws, or the lines will not line up.
+    let zen = app.mode() == crate::engine::Mode::Zen;
+    let widths: Vec<usize> = shown
+        .iter()
+        .map(|w| {
+            if zen {
+                w.input().chars().count()
+            } else {
+                w.text().chars().count()
+            }
+        })
+        .collect();
 
     let lines = wrap_words(&widths, area.width as usize);
     let height = area.height as usize;
@@ -291,7 +312,15 @@ fn render_words(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
                 spans.push(Span::raw(" "));
             }
             if index == active {
-                spans.extend(active_word(word, theme));
+                spans.extend(active_word(word, theme, zen));
+            } else if zen {
+                // A zen word is shown exactly as it was typed, in the plain text
+                // colour. There is no correct and no incorrect here — the site
+                // draws the whole line in `--text-color` and never marks an error.
+                spans.push(Span::styled(
+                    word.input(),
+                    Style::default().fg(theme.foreground),
+                ));
             } else {
                 spans.push(Span::styled(
                     word.text(),
@@ -330,39 +359,68 @@ fn settled_style(state: WordState, theme: Theme) -> Style {
     }
 }
 
-/// The active word: every character coloured by whether it matched, with the
-/// caret drawn inline on the next one.
+/// The active word, character by character, with the caret on the next one.
 ///
-/// The caret is inline rather than on a row of its own, which is what monkeytype
-/// does and what keeps it attached to its character once the line wraps.
-fn active_word(word: &Word, theme: Theme) -> Vec<Span<'static>> {
+/// The site's rules, from `test-ui.ts`:
+///
+/// - a character that was **not typed yet** is drawn in the plain text colour,
+///   with no state class at all;
+/// - one typed **correctly** is drawn in the correct colour;
+/// - one typed **wrongly** is drawn in the error colour — and it shows the
+///   *expected* character, not the one that was pressed. That is the site's
+///   choice, and it is the right one: the point of a red character is that the
+///   right one goes there instead, and showing what was actually pressed would
+///   make a correctly-spelled word look wrong in a different way each time;
+/// - one typed **past the end** of the word is an extra, and is drawn in the
+///   error colour showing what was typed;
+/// - a **space** is drawn as `_`, because a literal space is indistinguishable
+///   from the gap between two words.
+fn active_word(word: &Word, theme: Theme, zen: bool) -> Vec<Span<'static>> {
     let typed: Vec<char> = word.input().chars().collect();
-    let target: Vec<char> = word.text().chars().collect();
+    // In zen there is no target: the text being typed *is* the test, so the
+    // characters drawn are the ones that came out and none of them can be wrong.
+    let target: Vec<char> = if zen {
+        Vec::new()
+    } else {
+        word.text().chars().collect()
+    };
     let caret = typed.len();
     let width = target.len().max(typed.len());
     let mut spans = Vec::with_capacity(width + 1);
 
     for i in 0..width {
+        let expected = target.get(i).copied();
+        let actual = typed.get(i).copied();
+        let (shown, style) = match (expected, actual) {
+            // Zen: whatever came out, in the text colour, with nothing to compare
+            // it against. The site draws the whole line the same way.
+            (None, Some(actual)) if zen => (actual, Style::default().fg(theme.foreground)),
+            // Typed, and it was the right character.
+            (Some(expected), Some(actual)) if expected == actual => {
+                (expected, Style::default().fg(theme.foreground))
+            }
+            // Typed, and it was not: show what should have been there.
+            (Some(expected), Some(_)) => (expected, Style::default().fg(theme.incorrect)),
+            // Typed past the end of the word: an extra, shown as typed.
+            (None, Some(actual)) => (actual, Style::default().fg(theme.incorrect)),
+            // Not typed yet.
+            (Some(expected), None) => (expected, Style::default().fg(theme.muted)),
+            (None, None) => (' ', Style::default().fg(theme.muted)),
+        };
         let style = if i == caret {
             // The caret is an inverse block, so it needs the background swap.
             theme.caret()
-        } else if let Some(&actual) = typed.get(i) {
-            match target.get(i) {
-                Some(&expected) if actual == expected => Style::default().fg(theme.correct),
-                _ => Style::default().fg(theme.incorrect),
-            }
         } else {
-            Style::default().fg(theme.muted)
+            style
         };
-        // Show the target character where there is one, so the caret always sits
-        // on what the typist is being asked for, and the typed character where
-        // they have overrun the word.
-        let shown = target
-            .get(i)
-            .or_else(|| typed.get(i))
-            .copied()
-            .unwrap_or(' ');
-        spans.push(Span::styled(shown.to_string(), style));
+        // A literal space is indistinguishable from the gap between two words, so
+        // the site draws it as an underscore.
+        let glyph: String = if shown == ' ' {
+            "_".to_owned()
+        } else {
+            shown.to_string()
+        };
+        spans.push(Span::styled(glyph, style));
     }
 
     if caret >= width {
@@ -388,10 +446,13 @@ fn render_chart(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
 
 /// The counters, all on one line and centred, the way the site shows them.
 fn render_counters(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
+    // Escape is the command list — the same binding the site has when
+    // `quickRestart` is off, which is the default — so it is worth saying, or the
+    // list is a thing that exists and nothing points at it.
     let hint = if app.test().is_started() {
-        "tab skip · ctrl+r restart · f2 settings"
+        "tab skip · ctrl+r restart · esc commands · f2 settings"
     } else {
-        "type to start · ctrl+c quit"
+        "type to start · esc commands · ctrl+c quit"
     };
 
     let mut spans = Vec::new();

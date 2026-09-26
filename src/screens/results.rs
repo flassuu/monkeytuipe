@@ -117,6 +117,9 @@ impl Screen for Results {
             // A finished test is a result, not a place to type. Anything that
             // would edit it is dropped, so a stray keypress cannot alter a score
             // that is already on screen.
+            // Escape opens the command list from here too, which is where a
+            // finished test is most often re-run from.
+            Action::Command => vec![Effect::OpenCommands],
             Action::Char(_)
             | Action::Backspace
             | Action::Skip
@@ -124,7 +127,8 @@ impl Screen for Results {
             | Action::Down
             | Action::Left
             | Action::Right
-            | Action::Select => Vec::new(),
+            | Action::Select
+            | Action::Finish => Vec::new(),
         }
     }
 }

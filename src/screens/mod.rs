@@ -5,9 +5,11 @@
 //! applies. That keeps the data flow one-directional and lets a screen be
 //! unit-tested without an `App`.
 
-pub mod config_bar;
+pub mod commands;
+pub mod input;
 pub mod results;
 pub mod settings;
+pub mod topbar;
 pub mod typing;
 
 use ratatui::Frame;
@@ -57,6 +59,12 @@ pub enum Effect {
     OpenEditor(Row),
     /// Say something on the status line and carry on.
     ShowMessage(String),
+    /// Press whatever the top bar has selected.
+    PressBar,
+    /// Open the command list, which is what escape does.
+    OpenCommands,
+    /// End a zen test, which shift+enter does.
+    FinishTest,
 }
 
 /// A screen identified by kind, for code that needs to name one.

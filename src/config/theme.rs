@@ -378,6 +378,15 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
+    /// The plain text colour, for a character that has not been typed yet.
+    ///
+    /// The site gives an untyped letter no state class at all, so it comes out in
+    /// `--text-color`; using the muted colour here instead made untouched text look
+    /// disabled, which is a different thing.
+    pub fn muted(&self) -> Style {
+        Style::default().fg(self.foreground)
+    }
+
     /// Style for chrome that should recede.
     pub fn chrome(self) -> Style {
         Style::default().fg(self.muted)
