@@ -92,14 +92,21 @@ impl ThemeName {
         if self != Self::Auto {
             return self.resolve();
         }
-        let picked = if terminal.is_light() {
+        let mut theme = Self::auto_for(terminal).resolve();
+        terminal.adapt(&mut theme);
+        theme
+    }
+
+    /// The theme `auto` settles on, as a name.
+    ///
+    /// Exposed so the settings row can say *what* it decided rather than just
+    /// `auto`, which is a decision and not an answer.
+    pub fn auto_for(terminal: &super::terminal::Terminal) -> Self {
+        if terminal.is_light() {
             Self::SolarizedLight
         } else {
             Self::Monkeytype
-        };
-        let mut theme = picked.resolve();
-        terminal.adapt(&mut theme);
-        theme
+        }
     }
 
     /// Whether the theme is meant for a light terminal.

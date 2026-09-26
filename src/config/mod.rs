@@ -11,6 +11,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 pub use bar::{Bar, Field, LengthUnit, QuoteLength};
+pub use bar::{DIFFICULTIES, MODES, QUOTE_LENGTHS, TIMES, WORD_COUNTS};
 pub use terminal::Terminal;
 
 /// Defaults applied to any field the config file leaves out.

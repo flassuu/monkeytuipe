@@ -16,7 +16,11 @@ use crate::action::Action;
 use crate::app::App;
 
 /// Something a screen asks the app to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy`: several of these carry a value the user typed or picked out of a
+/// list, and a screen that could only hand over effects it still owned could not
+/// hand over a string.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     /// Leave the app.
     Quit,
@@ -38,6 +42,21 @@ pub enum Effect {
     MoveBar(i8),
     /// Change the selected bar field: up (`-1`) or down (`1`).
     ChangeBar(i8),
+    /// Switch to a word list, fetching it if it is not in the binary.
+    SetLanguage(String),
+    /// Store an ApeKey the user typed.
+    SetApeKey(String),
+    /// Store a custom passage the user typed.
+    SetCustomText(String),
+    /// Open the text editor for a settings row, seeded with its current value.
+    ///
+    /// The text comes back with the effect rather than being read where the
+    /// effect is made, because a screen has no `App` and the config is the app's.
+    /// A screen that read the config itself would have two sources of truth for
+    /// the same value, which is the way a settings screen starts lying.
+    OpenEditor(Row),
+    /// Say something on the status line and carry on.
+    ShowMessage(String),
 }
 
 /// A screen identified by kind, for code that needs to name one.
@@ -72,6 +91,15 @@ pub enum Row {
     Numbers,
     ApeKey,
     SubmitResults,
+    /// A passage the user typed, so it is not one of the bar's short choices.
+    CustomText,
+    /// Held by the settings bar, not by this screen. The variants exist because
+    /// the bar's fields are rows too, and one enum is one place to check that a
+    /// setting is not shown twice.
+    Mode,
+    Difficulty,
+    QuoteLength,
+    Blind,
     Back,
 }
 
@@ -104,6 +132,35 @@ impl ScreenState {
             Self::Typing(_) => ScreenKind::Typing,
             Self::Settings(_) => ScreenKind::Settings,
             Self::Results(_) => ScreenKind::Results,
+        }
+    }
+
+    /// Seeds the text editor for `row` with the value the app holds.
+    pub fn open_editor(&mut self, row: Row, text: String) {
+        if let Self::Settings(state) = self {
+            state.set_editor(row, text);
+        }
+    }
+
+    /// Whether the screen has a text field that a printable key belongs to.
+    ///
+    /// The same rule as the typing screen, for the same reason: `h` is bound to
+    /// `left`, so a keybind table shadows the letter `h` and there is no way to
+    /// type a word containing it. A screen that is collecting text says so, and
+    /// the resolution order inverts.
+    pub fn wants_text(&self) -> bool {
+        match self {
+            Self::Typing(_) => true,
+            Self::Settings(state) => state.wants_text(),
+            Self::Results(_) => false,
+        }
+    }
+
+    /// What the settings screen is showing, if it is the active screen.
+    pub fn settings_view(&self) -> Option<&settings::View> {
+        match self {
+            Self::Settings(state) => Some(state.view()),
+            _ => None,
         }
     }
 

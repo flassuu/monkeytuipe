@@ -25,6 +25,60 @@ pub const SIZES: [u32; 5] = [0, 1, 5, 10, 25];
 /// The largest list upstream ships for English, in words.
 pub const LARGEST_ENGLISH: u32 = 450;
 
+/// Base languages offered in the settings browser.
+///
+/// Upstream publishes about four hundred, and listing all of them would mean a
+/// picker nobody scrolls to the end of and a config file nobody edits by hand.
+/// These are the ones a test is actually run in, in the order they are worth
+/// offering, and the base lists for the first six of them are in the binary — so
+/// picking any of these works offline and picking any of the rest costs one
+/// download.
+///
+/// The sizes are not listed here: they are derived from the base, which is the
+/// whole point of the scheme.
+pub const POPULAR_BASES: &[&str] = &[
+    "english",
+    "russian",
+    "german",
+    "spanish",
+    "french",
+    "portuguese",
+    "italian",
+    "polish",
+    "dutch",
+    "ukrainian",
+    "romanian",
+    "czech",
+    "swedish",
+    "turkish",
+    "norwegian",
+    "finnish",
+    "danish",
+    "greek",
+    "hungarian",
+    "bulgarian",
+    "serbian",
+    "slovak",
+    "slovenian",
+    "croatian",
+    "hebrew",
+    "arabic",
+    "hindi",
+    "chinese_simplified",
+    "japanese",
+    "korean",
+    "vietnamese",
+    "thai",
+    "indonesian",
+    "estonian",
+    "latvian",
+    "lithuanian",
+    "kazakh",
+    "swiss_german",
+    "portuguese_brazilian",
+    "tagalog",
+];
+
 /// A word list the user can pick, and the file it comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Language {
@@ -244,6 +298,49 @@ mod tests {
         };
         assert_eq!(base.label(), "english");
         assert!(base.is_base());
+    }
+
+    /// The browser has to offer something, and it has to offer the base lists
+    /// that are in the binary first — picking one of those must work with no
+    /// network at all.
+    #[test]
+    fn the_offered_bases_start_with_the_embedded_ones() {
+        let embedded: Vec<&str> = crate::words::language::embedded_ids().collect();
+        for id in &embedded {
+            assert!(
+                POPULAR_BASES.contains(id),
+                "{id} is embedded but not offered in the browser"
+            );
+        }
+        // And the first entry is the one most tests are run in.
+        assert_eq!(POPULAR_BASES[0], "english");
+    }
+
+    #[test]
+    fn the_offered_bases_have_no_sizes_in_them() {
+        // A base with a size suffix in the list would produce `english_5k_1k`.
+        for base in POPULAR_BASES {
+            assert_eq!(split_id(base).1, None, "{base} carries a size");
+        }
+    }
+
+    #[test]
+    fn the_offered_bases_have_no_duplicates() {
+        let mut seen = std::collections::BTreeSet::new();
+        for base in POPULAR_BASES {
+            assert!(seen.insert(*base), "{base} is listed twice");
+        }
+    }
+
+    /// Every offered base must produce a valid id for every size.
+    #[test]
+    fn every_offered_base_has_valid_variants() {
+        for base in POPULAR_BASES {
+            for id in variants(base) {
+                assert!(!id.contains("__"), "{id} is malformed");
+                assert_eq!(base_of(&id), *base, "{id}");
+            }
+        }
     }
 
     #[test]

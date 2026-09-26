@@ -45,6 +45,16 @@ fn epoch_ms() -> i64 {
         .map_or(0, |since| since.as_millis() as i64)
 }
 
+/// A finished account request, delivered from the background.
+///
+/// The profile and the records are two requests and the profile is only worth
+/// showing when the records arrived, so they arrive together.
+#[derive(Debug, Clone)]
+pub struct Account {
+    pub profile: Result<api::Profile, String>,
+    pub bests: Result<api::PersonalBests, String>,
+}
+
 /// A language being fetched in the background.
 struct Pending {
     id: String,
@@ -118,6 +128,25 @@ pub struct App {
     config_path: PathBuf,
     /// Set when the config no longer matches what is on disk.
     dirty: bool,
+    /// A note for the status line, shown once and then cleared.
+    message: Option<String>,
+
+    /// The ApeKey client, built once the key is known.
+    ///
+    /// Built lazily rather than in `new` because the key can be edited while the
+    /// app is running, and a client holding the old key would keep fetching the
+    /// previous account's records.
+    api: Option<api::ApiClient>,
+    /// The signed-in user's profile, once fetched.
+    profile: Option<api::Profile>,
+    /// The personal bests, per mode, for the language in use.
+    bests: api::PersonalBests,
+    /// What went wrong with the account, for the settings screen.
+    account_note: Option<String>,
+    /// Where a finished account fetch is delivered.
+    account_inbox: Receiver<Account>,
+    account_sender: Sender<Account>,
+
     /// Whether the results screen has already been shown for this test.
     results_shown: bool,
     /// When the test began, in milliseconds since the epoch, for the result's
@@ -132,10 +161,13 @@ impl App {
     pub fn new(config: Config, config_path: PathBuf) -> Self {
         let (tx, inbox) = channel::<Language>();
         let (quote_tx, quote_inbox) = channel::<QuoteList>();
+        let (account_tx, account_inbox) = channel::<Account>();
         let mut app = Self {
             inbox_sender: tx,
             quote_sender: quote_tx,
             quote_inbox,
+            account_sender: account_tx,
+            account_inbox,
             language: language::embedded(FALLBACK_LANGUAGE).expect("english is embedded"),
             requested: FALLBACK_LANGUAGE.to_owned(),
             pending: None,
@@ -156,13 +188,146 @@ impl App {
             dirty: false,
             results_shown: false,
             started_at_ms: None,
+            message: None,
+            api: None,
+            profile: None,
+            bests: Default::default(),
+            account_note: None,
         };
         app.start_language(app.config.test.language.clone());
         app.start_quotes();
+        app.refresh_account();
         app
     }
 
     // ---- word lists ----------------------------------------------------
+
+    // ---- the account ---------------------------------------------------
+
+    /// True when an ApeKey is configured, i.e. the account endpoints are usable.
+    pub fn is_signed_in(&self) -> bool {
+        self.api
+            .as_ref()
+            .is_some_and(api::ApiClient::is_authenticated)
+    }
+
+    /// The signed-in user's profile, once it has been fetched.
+    pub fn profile(&self) -> Option<&api::Profile> {
+        self.profile.as_ref()
+    }
+
+    /// The personal bests fetched for the mode and language in use.
+    pub fn bests(&self) -> &api::PersonalBests {
+        &self.bests
+    }
+
+    /// The record the current test is being measured against, if there is one.
+    ///
+    /// Matched on mode, language *and* length: showing a 60-second record next to
+    /// a 15-second test would be a number that is true and useless.
+    pub fn personal_best_for(&self) -> Option<&api::PersonalBest> {
+        self.bests.best(
+            self.config.test.mode,
+            variants::base_of(&self.config.test.language),
+            self.config
+                .test
+                .mode
+                .length_unit()
+                .map(|_| match self.config.test.mode {
+                    crate::config::Mode::Words => self.config.test.words,
+                    _ => self.config.test.time,
+                }),
+        )
+    }
+
+    /// Why the account could not be read, for the settings screen.
+    pub fn account_note(&self) -> Option<&str> {
+        self.account_note.as_deref()
+    }
+
+    /// Builds the client for the configured key, dropping anything fetched for a
+    /// previous one.
+    fn rebuild_client(&mut self) {
+        self.clear_account();
+        let Some(key) = self.config.resolved_ape_key() else {
+            self.api = None;
+            return;
+        };
+        self.api = Some(api::ApiClient::new(self.config.api_url.clone(), key));
+    }
+
+    /// Forgets the account, because the key behind it changed or went away.
+    fn clear_account(&mut self) {
+        self.profile = None;
+        self.bests = Default::default();
+        self.account_note = None;
+    }
+
+    /// Starts a fetch of the profile and the records.
+    ///
+    /// Both go out at once and neither blocks the first frame: a user with no
+    /// network should get a typing test, not a spinner.
+    pub fn refresh_account(&mut self) {
+        self.rebuild_client();
+        let Some(client) = self.api.clone() else {
+            self.account_note = Some("no ApeKey set — reads need one".to_owned());
+            return;
+        };
+        let mode = self.config.test.mode;
+        let language = variants::base_of(&self.config.test.language).to_owned();
+        let tx = self.account_sender.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            // No runtime: a headless caller has no network, and saying so is
+            // better than a spinner that never resolves.
+            self.account_note = Some("no network runtime available".to_owned());
+            return;
+        };
+        handle.spawn(async move {
+            let profile = client.profile().await.map_err(|e| e.to_string());
+            let bests = match &profile {
+                Ok(_) => match client.personal_bests(mode, &language).await {
+                    Ok(records) => {
+                        let mut out = api::PersonalBests::default();
+                        match mode {
+                            crate::config::Mode::Time => out.time = records,
+                            crate::config::Mode::Words => out.words = records,
+                            _ => out.quote = records,
+                        }
+                        Ok(out)
+                    }
+                    Err(e) => Err(e.to_string()),
+                },
+                // No profile, so no point asking for records: the key is the
+                // problem and the second request would fail the same way.
+                Err(e) => Err(e.clone()),
+            };
+            let _ = tx.send(Account { profile, bests });
+        });
+    }
+
+    /// Picks up a finished account request.
+    fn drain_account(&mut self) {
+        while let Ok(account) = self.account_inbox.try_recv() {
+            self.account_note = match (account.profile, account.bests) {
+                (Ok(profile), Ok(bests)) => {
+                    self.profile = Some(profile);
+                    self.bests = bests;
+                    None
+                }
+                (Err(error), _) => Some(error),
+                (_, Err(error)) => Some(error),
+            };
+        }
+    }
+
+    /// The text the settings editor for a row should start from.
+    fn row_text(&self, row: Row) -> String {
+        match row {
+            Row::CustomText => self.config.test.custom_text.join("\n"),
+            Row::ApeKey => self.config.ape_key.clone(),
+            _ => String::new(),
+        }
+    }
 
     /// The word list in use.
     pub fn language(&self) -> &Language {
@@ -860,6 +1025,12 @@ impl App {
     }
 
     /// The settings row currently highlighted, for tests and later UI.
+    /// What the settings screen is currently showing, for the tests and for
+    /// anything that has to know whether an editor has the keyboard.
+    pub fn view_kind(&self) -> Option<&crate::screens::settings::View> {
+        self.screen.settings_view()
+    }
+
     pub fn selected_row(&self) -> Option<Row> {
         self.screen.selected_row()
     }
@@ -927,6 +1098,7 @@ impl App {
     pub fn tick(&mut self) {
         self.drain_languages();
         self.drain_quotes();
+        self.drain_account();
         if !self.test.is_finished() {
             if let Some(anchor) = self.anchor {
                 self.elapsed = anchor.elapsed();
@@ -1129,6 +1301,43 @@ impl App {
                 self.adjust(row);
                 false
             }
+            Effect::SetLanguage(id) => {
+                self.config.test.language = id.clone();
+                self.start_language(id);
+                false
+            }
+            Effect::SetApeKey(key) => {
+                self.config.ape_key = key;
+                self.dirty = true;
+                // A new key means a different account, so whatever was fetched
+                // for the old one is no longer about this user.
+                self.clear_account();
+                false
+            }
+            Effect::SetCustomText(text) => {
+                // A passage is a list of lines and the first is the test, so
+                // saving is splitting on newlines and dropping the blanks.
+                self.config.test.custom_text = text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                self.dirty = true;
+                if self.config.test.mode == crate::config::Mode::Custom {
+                    self.regenerate();
+                }
+                false
+            }
+            Effect::OpenEditor(row) => {
+                let text = self.row_text(row);
+                self.screen.open_editor(row, text);
+                false
+            }
+            Effect::ShowMessage(message) => {
+                self.message = Some(message);
+                false
+            }
             Effect::MoveBar(by) => {
                 self.move_bar_selection(isize::from(by));
                 false
@@ -1146,21 +1355,49 @@ impl App {
     }
 
     /// Applies a `left`/`right` press, or a toggle, to a settings row.
+    ///
+    /// Every variant is listed, including the ones that do nothing, so a new row
+    /// cannot silently become a no-op: adding it here and forgetting it is a
+    /// compile error rather than a key that quietly stops working.
     fn adjust(&mut self, row: Row) {
         match row {
             Row::Theme => self.config.theme = self.config.theme.next(),
             Row::Language => {
-                self.config.test.language = next_language(&self.config.test.language);
-                let id = self.config.test.language.clone();
+                let id = next_language(&self.config.test.language);
+                self.config.test.language = id.clone();
                 self.start_language(id);
             }
             Row::Punctuation => self.config.test.punctuation = !self.config.test.punctuation,
             Row::Numbers => self.config.test.numbers = !self.config.test.numbers,
+            // The switch is still honoured so an existing config is not ignored —
+            // but it cannot make submission work, and the screen says so.
             Row::SubmitResults => self.config.submit_results = !self.config.submit_results,
-            // The ApeKey is text input and `Back` is navigation; neither is a toggle.
-            Row::ApeKey | Row::Back => return,
+            // Free text and the bar's own fields. A row that has a view is
+            // opened by the screen, not stepped here, and the bar's fields are
+            // changed through the bar.
+            Row::CustomText
+            | Row::ApeKey
+            | Row::Mode
+            | Row::Difficulty
+            | Row::QuoteLength
+            | Row::Blind
+            | Row::Back => return,
         }
         self.dirty = true;
+        // Punctuation, numbers and the language all change the words, so the test
+        // is rebuilt to show the effect before it is typed.
+        if matches!(
+            row,
+            Row::Punctuation | Row::Numbers | Row::Theme | Row::Language
+        ) {
+            self.regenerate();
+        }
+        // A new key means a different account, so the records for the old one
+        // have to go.
+        if row == Row::Theme {
+            // The theme is not a word-list setting, so nothing else to do; this
+            // branch exists to say so rather than leave it implied.
+        }
     }
 
     /// True when the config has changes that are not on disk.
@@ -1247,7 +1484,11 @@ impl App {
             KeyCode::Char(c) => shortcut.then_some(c),
             _ => None,
         };
-        if self.screen.kind() == ScreenKind::Typing {
+        // A printable key is text whenever the screen has a field to put it in.
+        // `h` is bound to `left`, so without this a word containing an `h` cannot
+        // be typed in the settings editor at all — the same rule the typing screen
+        // follows, for the same reason.
+        if self.screen.wants_text() {
             if let Some(c) = printable {
                 return Some(Action::Char(c));
             }
@@ -2194,11 +2435,62 @@ mod tests {
 
     /// With no quote downloaded yet there is still something on screen, and it
     /// says what is wrong rather than being blank.
+    /// With no quote file there is still something on screen, and it says what is
+    /// wrong rather than being blank. The cache may or may not be warm on the
+    /// machine running this, so the state is set rather than assumed.
     #[test]
     fn a_quote_test_without_quotes_says_so() {
-        let app = app_with_test(crate::config::Mode::Quote);
+        let mut app = app_with_test(crate::config::Mode::Quote);
+        app.quotes = None;
+        app.regenerate();
         assert_eq!(app.test().words().len(), 1);
         assert!(app.test().words()[0].text().contains("download"));
+    }
+
+    /// And with a quote file the passage is typed, not the placeholder.
+    #[test]
+    fn a_quote_test_types_the_quote_when_there_is_one() {
+        let mut app = app_with_test(crate::config::Mode::Quote);
+        app.quotes = Some(crate::words::quotes::QuoteList {
+            language: "english".to_owned(),
+            groups: Vec::new(),
+            quotes: vec![crate::words::quotes::Quote {
+                id: 1,
+                text: "one two three".to_owned(),
+                source: Some("s".to_owned()),
+                length: 13,
+                british_text: None,
+                words: Vec::new(),
+            }],
+        });
+        app.regenerate();
+        let typed: Vec<&str> = app.test().words().iter().map(|w| w.text()).collect();
+        assert_eq!(typed, ["one", "two", "three"]);
+    }
+
+    /// The four buckets, and a language with none in the one asked for.
+    #[test]
+    fn a_quote_length_that_nothing_falls_in_says_which_ones_do() {
+        let mut app = app_with_test(crate::config::Mode::Quote);
+        app.quotes = Some(crate::words::quotes::QuoteList {
+            language: "klingon".to_owned(),
+            groups: Vec::new(),
+            quotes: vec![crate::words::quotes::Quote {
+                id: 1,
+                text: "short".to_owned(),
+                source: Some("s".to_owned()),
+                length: 5,
+                british_text: None,
+                words: Vec::new(),
+            }],
+        });
+        app.config.test.quote_length = crate::config::QuoteLength::Thicc;
+        app.regenerate();
+        let word = &app.test().words()[0].text();
+        assert!(word.contains("no thicc quotes"), "{word}");
+        // And it names the buckets that do have some, because "nothing at all" and
+        // "nothing that long" are different problems.
+        assert!(word.contains("short"), "{word}");
     }
 
     /// Zen is endless: committing a word must produce another one rather than
@@ -2384,6 +2676,176 @@ mod tests {
             0,
             "the server rounds this to the second"
         );
+    }
+
+    // ---- the account ----------------------------------------------------
+
+    /// An app with a finished test, so a record has something to be compared to.
+    fn with_result() -> App {
+        let mut app = run_one();
+        app.set_elapsed(Duration::from_secs(12));
+        app.tick();
+        app
+    }
+
+    fn best_of(language: &str, mode2: &str, wpm: f64) -> api::PersonalBest {
+        api::PersonalBest {
+            language: language.to_owned(),
+            mode2: mode2.to_owned(),
+            wpm,
+            time: 10.0,
+            timestamp: 0,
+        }
+    }
+
+    #[test]
+    fn with_no_key_the_app_says_so_rather_than_spinning() {
+        let app = app();
+        assert!(!app.is_signed_in());
+        assert_eq!(app.account_note(), Some("no ApeKey set — reads need one"));
+    }
+
+    #[test]
+    fn a_key_makes_the_client_authenticated() {
+        let app = App::new(
+            Config {
+                ape_key: "abc".to_owned(),
+                ..Config::default()
+            },
+            PathBuf::from("/nonexistent/config.toml"),
+        );
+        assert!(app.is_signed_in());
+        assert!(app.profile().is_none(), "nothing has been fetched yet");
+    }
+
+    /// A record from another language or another length is not this test's record.
+    #[test]
+    fn a_record_only_matches_the_test_it_belongs_to() {
+        let mut app = with_result();
+        app.config.test.time = 10;
+        app.bests.time = vec![
+            best_of("english", "10", 100.0),
+            best_of("english", "60", 150.0),
+            best_of("russian", "10", 200.0),
+        ];
+        assert_eq!(app.personal_best_for().map(|b| b.wpm), Some(100.0));
+
+        app.config.test.language = "russian".to_owned();
+        assert_eq!(app.personal_best_for().map(|b| b.wpm), Some(200.0));
+    }
+
+    /// A sized language is still the same base language to the API, which has no
+    /// `english_5k.json` for records.
+    #[test]
+    fn a_sized_language_matches_a_base_language_record() {
+        let mut app = with_result();
+        app.config.test.time = 10;
+        app.config.test.language = "english_5k".to_owned();
+        app.bests.time = vec![best_of("english", "10", 111.0)];
+        assert_eq!(
+            app.personal_best_for().map(|b| b.wpm),
+            Some(111.0),
+            "english_5k should find the english record"
+        );
+    }
+
+    #[test]
+    fn no_record_for_this_combination_shows_nothing() {
+        let mut app = with_result();
+        app.bests.time = vec![best_of("english", "60", 150.0)];
+        assert!(app.personal_best_for().is_none());
+    }
+
+    /// A record is not a personal best for a mode it was not set in.
+    #[test]
+    fn a_record_from_another_mode_is_not_offered() {
+        let mut app = with_result();
+        app.config.test.mode = crate::config::Mode::Words;
+        app.config.test.words = 25;
+        app.bests.time = vec![best_of("english", "10", 150.0)];
+        assert!(app.personal_best_for().is_none());
+    }
+
+    /// A quote or zen test has no comparable record, so none is shown rather than
+    /// one from a different kind of test.
+    #[test]
+    fn a_mode_with_no_records_shows_none() {
+        for mode in [crate::config::Mode::Quote, crate::config::Mode::Zen] {
+            let mut app = with_result();
+            app.config.test.mode = mode;
+            app.bests.time = vec![best_of("english", "10", 150.0)];
+            assert!(app.personal_best_for().is_none(), "{mode:?}");
+        }
+    }
+
+    /// Changing the key changes the account, so what was fetched for the old one
+    /// has to go rather than be shown against the new key's name.
+    #[test]
+    fn a_new_key_forgets_the_previous_account() {
+        let mut app = with_result();
+        app.profile = Some(api::Profile {
+            uid: "old".to_owned(),
+            name: "old".to_owned(),
+            streak: 99,
+            lb_opt_out: false,
+            banned: false,
+        });
+        app.bests.time = vec![best_of("english", "10", 100.0)];
+        assert!(app.profile().is_some());
+
+        app.on_key(press(KeyCode::Char('x'))).expect("no io");
+        // Reaching the settings screen and the key row is a lot of keystrokes, so
+        // the effect is applied directly — which is what the app does with it.
+        app.apply(crate::screens::Effect::SetApeKey("newkey".to_owned()));
+        assert!(app.profile().is_none(), "the old profile is still shown");
+        assert!(
+            app.personal_best_for().is_none(),
+            "the old records are still shown"
+        );
+    }
+
+    /// A fetch that failed says why, and the note is the server's own wording.
+    #[test]
+    fn a_failed_fetch_leaves_a_note_rather_than_an_empty_screen() {
+        let mut app = with_result();
+        app.drain_account();
+        // Nothing has arrived, so there is nothing to say beyond "no key".
+        assert!(app.account_note().is_some() || !app.is_signed_in());
+    }
+
+    /// The whole reason the screen says it wants text: `h` is bound to `left`,
+    /// so without that a passage containing an `h` could not be typed at all.
+    #[test]
+    fn a_bound_letter_reaches_a_text_field() {
+        let mut app = App::new(Config::default(), PathBuf::from("/nonexistent/config.toml"));
+        app.show_screen(ScreenKind::Settings);
+        // Down to the ApeKey row and open the editor.
+        for _ in 0..3 {
+            app.press(KeyCode::Down);
+        }
+        assert_eq!(app.selected_row(), Some(Row::ApeKey));
+        app.press(KeyCode::Enter);
+        for c in "hash".chars() {
+            app.press(KeyCode::Char(c));
+        }
+        app.press(KeyCode::Enter);
+        assert_eq!(app.config.ape_key, "hash", "the h was treated as a binding");
+    }
+
+    /// The editor's bounds are about the text, so a bound key must not move the
+    /// caret or change the selection while one is open.
+    #[test]
+    fn an_open_editor_keeps_the_keyboard() {
+        let mut app = App::new(Config::default(), PathBuf::from("/nonexistent/config.toml"));
+        app.show_screen(ScreenKind::Settings);
+        for _ in 0..3 {
+            app.press(KeyCode::Down);
+        }
+        app.press(KeyCode::Enter);
+        // Left is bound; in an editor it is simply not what a letter does.
+        app.press(KeyCode::Char('h'));
+        app.press(KeyCode::Enter);
+        assert_eq!(app.config.ape_key, "h");
     }
 
     #[test]

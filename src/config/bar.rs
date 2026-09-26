@@ -89,6 +89,13 @@ impl Field {
     }
 }
 
+/// The word-list sizes, in the order the bar cycles them.
+///
+/// Re-exported from [`crate::words::variants`] rather than duplicated, so the
+/// browser's columns and the bar's cycle cannot drift apart — which would show a
+/// size in the picker that the bar then steps past.
+pub use crate::words::variants::SIZES as variants_sizes;
+
 /// The modes, in the website's order.
 pub const MODES: [Mode; 5] = [
     Mode::Time,

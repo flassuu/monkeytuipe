@@ -55,7 +55,7 @@ impl Screen for Results {
             return;
         };
 
-        render_headline(&result, theme, area, frame);
+        render_headline(&result, app, theme, area, frame);
 
         // Below the headline: the chart, then the breakdown, then the footer.
         // The chart is the first band to lose rows on a short terminal, because
@@ -133,21 +133,29 @@ impl Screen for Results {
 ///
 /// Centred, and clipped rather than wrapped — a counter row that wrapped would
 /// be two rows and would push the chart off a short terminal.
-fn render_headline(result: &TestResult, theme: Theme, area: Rect, frame: &mut Frame) {
+fn render_headline(result: &TestResult, app: &App, theme: Theme, area: Rect, frame: &mut Frame) {
     let shown = area.height.min(HEADLINE_ROWS);
     if shown == 0 {
         return;
     }
 
-    let speed = figures(
-        &[
-            ("wpm", format!("{:.0}", result.wpm)),
-            ("raw", format!("{:.0}", result.raw_wpm)),
-            ("chars", result.chars.correct_word.to_string()),
-        ],
-        theme,
-    );
-    render_line(area, speed, frame);
+    // The record sits next to the figure it is a record of, so a new best is
+    // visible without a second screen. Matched on mode, language *and* length, so
+    // a 60-second record is never shown beside a 15-second test — a number that
+    // is true and useless.
+    let mut speed: Vec<(&str, String)> = vec![
+        ("wpm", format!("{:.0}", result.wpm)),
+        ("raw", format!("{:.0}", result.raw_wpm)),
+        ("chars", result.chars.correct_word.to_string()),
+    ];
+    if let Some(best) = app.personal_best_for() {
+        let faster = result.wpm > best.wpm;
+        speed.push((
+            "best",
+            format!("{:.0}{}", best.wpm, if faster { " \u{2605}" } else { "" }),
+        ));
+    }
+    render_line(area, figures(&speed, theme), frame);
 
     if shown < 2 {
         return;
@@ -280,6 +288,39 @@ fn render_footer(area: Rect, theme: Theme, frame: &mut Frame) {
     ))
     .alignment(Alignment::Center);
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// The account line: who is signed in, or why the records are not there.
+///
+/// On the settings screen, because the ApeKey is there: they are the same setting
+/// and the same question, and a user who cannot get their records should be told
+/// which of "no key", "wrong key" and "no network" it is.
+pub fn account_line(app: &App, theme: Theme) -> Line<'static> {
+    if let Some(profile) = app.profile() {
+        let streak = if profile.streak > 0 {
+            format!(" · {} day streak", profile.streak)
+        } else {
+            String::new()
+        };
+        return Line::from(Span::styled(
+            format!(" {} ({}){streak}", profile.display_name(), profile.uid),
+            theme.chrome(),
+        ));
+    }
+    match app.account_note() {
+        Some(note) => Line::from(vec![
+            Span::styled(" not signed in — ", theme.chrome()),
+            Span::styled(note.to_owned(), theme.chrome()),
+        ]),
+        None if !app.is_signed_in() => Line::from(Span::styled(
+            " not signed in — set an ApeKey in settings",
+            theme.chrome(),
+        )),
+        None => Line::from(Span::styled(
+            " signed in · reading records…",
+            theme.chrome(),
+        )),
+    }
 }
 
 #[cfg(test)]

@@ -377,13 +377,16 @@ fn the_settings_screen_lists_every_row() {
     app.show_screen(ScreenKind::Settings);
     let screen = lines(&render(&app, 60, 14));
     assert!(screen[0].contains("settings"), "no title in {screen:?}");
+    // Only what the settings screen owns. Punctuation, numbers, difficulty and
+    // the length live in the bar, and a test that expected them here is testing
+    // a layout the screen deliberately does not have.
     for label in [
         "theme",
         "language",
-        "punctuation",
-        "numbers",
+        "custom text",
         "ape key",
         "submit results",
+        "back to typing",
     ] {
         assert!(
             screen.iter().any(|l| l.contains(label)),
