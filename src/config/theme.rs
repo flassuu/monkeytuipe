@@ -390,6 +390,11 @@ impl Theme {
         ]
     }
 
+    /// Style for something that went right.
+    pub fn correct_style(self) -> Style {
+        Style::default().fg(self.correct)
+    }
+
     /// Style for a live number, e.g. the wpm counter.
     pub fn value(self) -> Style {
         Style::default()

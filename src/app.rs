@@ -8,6 +8,7 @@ use anyhow::Context;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::action::Action;
+use crate::api;
 use crate::config::bar::{self, on_off, step, Bar, Field, LengthUnit};
 use crate::config::theme::Theme;
 use crate::config::Config;
@@ -33,6 +34,16 @@ pub const TICK: Duration = Duration::from_millis(100);
 /// is always in the binary. The status line says so rather than pretending the
 /// test is in the requested language.
 const FALLBACK_LANGUAGE: &str = "english";
+
+/// Milliseconds since the Unix epoch.
+///
+/// Used for the result's `timestamp`, which the server rounds to the second and
+/// buckets by day, so it has to be wall time rather than the test's own clock.
+fn epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as i64)
+}
 
 /// A language being fetched in the background.
 struct Pending {
@@ -109,6 +120,10 @@ pub struct App {
     dirty: bool,
     /// Whether the results screen has already been shown for this test.
     results_shown: bool,
+    /// When the test began, in milliseconds since the epoch, for the result's
+    /// `timestamp`. Taken from the system clock rather than from the test clock:
+    /// the server uses it to bucket results by day, so it has to be wall time.
+    started_at_ms: Option<i64>,
 }
 
 impl App {
@@ -140,6 +155,7 @@ impl App {
             config_path,
             dirty: false,
             results_shown: false,
+            started_at_ms: None,
         };
         app.start_language(app.config.test.language.clone());
         app.start_quotes();
@@ -709,6 +725,56 @@ impl App {
         )
     }
 
+    /// The finished test, prepared for submission.
+    ///
+    /// Computed and kept even though it cannot be sent, because it is what a
+    /// submission needs and because a hash that is quietly wrong is worse than
+    /// one that is verifiably right. [`Self::submit`] is what actually tries, and
+    /// it reports that there was nowhere to send it.
+    pub fn submission_body(&self) -> Option<api::submission::ResultBody> {
+        let result = self.result()?;
+        let test = &self.config.test;
+        Some(api::submission::body_for(
+            &result,
+            api::submission::TestSettings {
+                mode: test.mode.as_str(),
+                mode2: self.mode2_string(),
+                language: api::language_for_submission(&test.language),
+                difficulty: test.difficulty.as_str(),
+                punctuation: test.punctuation,
+                numbers: test.numbers,
+                blind: test.blind,
+                timestamp_ms: self.timestamp_ms(),
+            },
+        ))
+    }
+
+    /// What happened when a finished test was offered to monkeytype.
+    pub fn submit(&self) -> api::submission::SubmitOutcome {
+        api::submission::SubmitOutcome::Nowhere {
+            destination: api::submission::Destination::Monkeytype,
+            reason: api::submission::Destination::Monkeytype.describe(),
+        }
+    }
+
+    /// `mode2` as the server wants it: a string, because that is what the site's
+    /// own payload carries even where the schema also accepts a number.
+    fn mode2_string(&self) -> String {
+        match self.config.test.mode {
+            crate::config::Mode::Quote | crate::config::Mode::Custom => {
+                // A passage's length is its own; the site sends the quote id here,
+                // which a client that picks a quote locally does have.
+                self.test.words().len().to_string()
+            }
+            _ => self.test_length().to_string(),
+        }
+    }
+
+    /// When the test ended, in milliseconds since the epoch.
+    fn timestamp_ms(&self) -> i64 {
+        (self.started_at_ms.unwrap_or_else(epoch_ms) / 1000) * 1000
+    }
+
     /// The finished test, scored. `None` until one has been run.
     ///
     /// A pure function of the log, so it is recomputed on demand: there is no
@@ -835,6 +901,7 @@ impl App {
         self.elapsed = Duration::ZERO;
         self.anchor = None;
         self.manual_clock = false;
+        self.started_at_ms = None;
     }
 
     /// Advances the clock, ending the test if its time is up.
@@ -897,6 +964,7 @@ impl App {
             }
         } else if !self.manual_clock {
             self.anchor = Some(Instant::now());
+            self.started_at_ms = Some(epoch_ms());
         }
 
         // Recorded before the engine sees the character, because afterwards the
@@ -2182,6 +2250,80 @@ mod tests {
         let before = app.config.test.punctuation;
         app.change_bar_field(Field::Punctuation, 1);
         assert_ne!(app.config.test.punctuation, before);
+    }
+
+    // ---- submission -----------------------------------------------------
+
+    /// A test that has been run, so there is a result to prepare.
+    fn run_one() -> App {
+        let mut config = Config::default();
+        config.test.time = 10;
+        let mut app = App::new(config, PathBuf::from("/nonexistent/config.toml"));
+        app.set_words("the quick brown".split(' ').map(str::to_owned).collect());
+        app.set_elapsed(Duration::from_millis(1500));
+        for c in "the quick ".chars() {
+            app.type_char(c);
+        }
+        app
+    }
+
+    /// A finished test must produce a payload with a hash, because the hash is
+    /// what the server checks first and a missing one is an unexplained 461.
+    #[test]
+    fn a_finished_test_produces_a_hashed_payload() {
+        let app = run_one();
+        let body = app.submission_body().expect("a payload");
+        assert!(!body.result.hash.is_empty(), "the payload has no hash");
+        assert_eq!(body.result.mode, "time");
+        assert_eq!(
+            body.result.mode2, "10",
+            "the length is a string, as the site sends it"
+        );
+        assert_eq!(body.result.language, "english");
+        assert_eq!(body.result.difficulty, "normal");
+        assert!(body.result.wpm > 0.0);
+    }
+
+    /// There is no writable endpoint on the public API for an ApeKey, and the
+    /// app must say so rather than report a save that did not happen.
+    #[test]
+    fn submitting_reports_that_there_was_nowhere_to_send_it() {
+        let app = run_one();
+        let outcome = app.submit();
+        assert!(!outcome.was_saved());
+        let message = outcome.message();
+        assert!(message.contains("not submitted"), "{message}");
+        assert!(message.contains("ApeKey"), "{message}");
+    }
+
+    /// An unstarted test has nothing to submit, and must not invent a payload.
+    #[test]
+    fn an_unrun_test_has_no_payload() {
+        let app = app();
+        assert!(app.submission_body().is_none());
+    }
+
+    /// The timestamp is wall time rounded to the second, because the server
+    /// buckets results by day using it.
+    #[test]
+    fn the_timestamp_is_the_second_the_test_started() {
+        let app = run_one();
+        let body = app.submission_body().expect("a payload");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after 1970")
+            .as_millis() as i64;
+        assert!(body.result.timestamp > 0, "the timestamp was not set");
+        assert!(
+            body.result.timestamp <= now_ms,
+            "{} is in the future",
+            body.result.timestamp
+        );
+        assert_eq!(
+            body.result.timestamp % 1000,
+            0,
+            "the server rounds this to the second"
+        );
     }
 
     #[test]

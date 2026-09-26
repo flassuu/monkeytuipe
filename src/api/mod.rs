@@ -1,10 +1,43 @@
-//! monkeytype API client.
+//! The monkeytype API client.
 //!
-//! Scope for now: a typed client with ApeKey auth and the profile endpoint,
-//! which is where the `uid` needed for result hashing comes from. Result
-//! submission lands in a later phase — see `RESEARCH.md` §3.2.
+//! ## What an ApeKey can and cannot do
+//!
+//! The useful thing to know about this API before designing around it: **an
+//! ApeKey cannot submit a result.** `POST /results` is authenticated with a
+//! Firebase bearer token, and the server says so plainly — an ApeKey gets
+//! `401 This endpoint does not accept ApeKeys`. That is not a gap to work around
+//! on this side; the write path belongs to the browser.
+//!
+//! What an ApeKey *can* do is read, and that is most of the value anyway:
+//!
+//! | Endpoint | With an ApeKey |
+//! |---|---|
+//! | `GET /users` | profile, streak, the `uid` |
+//! | `GET /users/personalBests` | best times per mode, language and length |
+//! | `GET /users/tags` | the tags results can be filed under |
+//! | `GET /users/stats` | lifetime typing statistics |
+//! | `GET /users/streak` | the current and longest streak |
+//! | `GET /users/currentTestActivity` | whether a test is already running |
+//! | `POST /results` | **no** — needs a bearer token |
+//! | `GET`/`PATCH` `/configs` | **no** — needs a bearer token |
+//!
+//! So this client reads. The submission path is [`submission`], which computes
+//! the payload and the object hash and then reports honestly that there is
+//! nowhere to send it, rather than pretending the test was saved.
+//!
+//! ## The header
+//!
+//! `Authorization: ApeKey <key>`. Not `apikey: <key>`, which is the header a
+//! self-hosted *middleware* uses and which the public API answers
+//! `{"message":"Unauthorized"}` to.
+
+use std::time::Duration;
 
 use serde::Deserialize;
+
+use crate::config::Mode;
+
+pub mod submission;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.monkeytype.com";
 
@@ -24,6 +57,34 @@ pub enum ApiError {
     Rejected { code: u16, message: String },
 }
 
+impl ApiError {
+    /// Whether this is the server saying the key is wrong, as opposed to the
+    /// network being down or a bug here.
+    ///
+    /// Worth distinguishing: "your ApeKey is not accepted" is something the user
+    /// can fix, and a network failure is not.
+    pub fn is_auth_failure(&self) -> bool {
+        matches!(self, Self::Status { code: 401, .. })
+    }
+}
+
+/// Reads a field that upstream types as "a string, or a number".
+fn string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNumber {
+        Text(String),
+        Number(i64),
+    }
+    match StringOrNumber::deserialize(deserializer)? {
+        StringOrNumber::Text(text) => Ok(text),
+        StringOrNumber::Number(number) => Ok(number.to_string()),
+    }
+}
+
 /// The envelope every monkeytype endpoint wraps its payload in.
 #[derive(Debug, Deserialize)]
 struct Envelope<T> {
@@ -35,11 +96,94 @@ struct Envelope<T> {
 /// The slice of `GET /users` the app actually needs.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Profile {
+    #[serde(default)]
     pub uid: String,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub streak: u16,
+    /// Whether the account has opted out of the leaderboard.
+    #[serde(default, rename = "lbOptOut")]
+    pub lb_opt_out: bool,
+    #[serde(default, rename = "banned")]
+    pub banned: bool,
+}
+
+impl Profile {
+    /// The name to show, falling back to something honest rather than blank.
+    pub fn display_name(&self) -> &str {
+        if self.name.is_empty() {
+            "anonymous"
+        } else {
+            &self.name
+        }
+    }
+}
+
+/// One record from `GET /users/personalBests`.
+///
+/// The shape is irregular — a `time` record is `{language, mode2: "30", wpm}`
+/// while a `words` record is `{language, mode2: "25", wpm}` and a quote record
+/// carries the quote id — so this is the union flattened to what every one of
+/// them has.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PersonalBest {
+    #[serde(default)]
+    pub language: String,
+    /// The length, as a string: seconds for a time test, words for a words test,
+    /// a quote id for a quote test.
+    ///
+    /// Upstream's schema is `StringNumberSchema` — a string *or* a number — and
+    /// the site always sends a string, but a number is valid and appears in
+    /// records written by older builds. Deserialising straight into a `String`
+    /// would make every one of those records fail to parse, and a client that
+    /// silently sees no personal bests is worse than one that says it cannot
+    /// reach them.
+    #[serde(default, deserialize_with = "string_or_number")]
+    pub mode2: String,
+    pub wpm: f64,
+    /// Time in seconds, for a words test.
+    #[serde(default)]
+    pub time: f64,
+    #[serde(default)]
+    pub timestamp: i64,
+}
+
+impl PersonalBest {
+    /// `mode2` as a number, for comparing against the current test's length.
+    pub fn length(&self) -> Option<u32> {
+        self.mode2.parse::<u32>().ok()
+    }
+}
+
+/// `GET /users/personalBests`, grouped by mode.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PersonalBests {
+    pub time: Vec<PersonalBest>,
+    pub words: Vec<PersonalBest>,
+    pub quote: Vec<PersonalBest>,
+}
+
+impl PersonalBests {
+    /// The best record for a mode, language and length, if there is one.
+    ///
+    /// The API returns every combination the user has set, so the match has to be
+    /// on all three; picking the first record for a mode and showing it next to a
+    /// test in a different language would be a lie with a number on it.
+    pub fn best(&self, mode: Mode, language: &str, length: Option<u32>) -> Option<&PersonalBest> {
+        let list = match mode {
+            Mode::Time => &self.time,
+            Mode::Words => &self.words,
+            _ => return None,
+        };
+        list.iter()
+            .filter(|best| best.language == language)
+            .filter(|best| match length {
+                Some(length) => best.length() == Some(length),
+                None => true,
+            })
+            .max_by(|a, b| a.wpm.total_cmp(&b.wpm))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -53,7 +197,7 @@ impl ApiClient {
     pub fn new(base_url: impl Into<String>, ape_key: impl Into<String>) -> Self {
         let http = reqwest::Client::builder()
             .user_agent(concat!("monkeytuipe/", env!("CARGO_PKG_VERSION")))
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(Duration::from_secs(15))
             .build()
             .expect("a static client config cannot fail to build");
         Self {
@@ -68,12 +212,19 @@ impl ApiClient {
         !self.ape_key.is_empty()
     }
 
-    async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let url = format!("{}{path}", self.base_url);
+        let builder = self.http.request(method, url);
+        if self.ape_key.is_empty() {
+            builder
+        } else {
+            builder.header("Authorization", format!("ApeKey {}", self.ape_key))
+        }
+    }
+
+    async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
         let response = self
-            .http
-            .get(&url)
-            .header("apikey", &self.ape_key)
+            .request(reqwest::Method::GET, path)
             .send()
             .await?
             .error_for_status()
@@ -96,11 +247,37 @@ impl ApiClient {
         Err(classify(envelope.status, message))
     }
 
-    /// `GET /users` — the signed-in user's profile, including the `uid` that
-    /// result hashes are computed over.
+    /// `GET /users` — the signed-in user's profile.
     pub async fn profile(&self) -> Result<Profile, ApiError> {
         self.get("/users").await
     }
+
+    /// `GET /users/personalBests?mode=<mode>&language=<language>`.
+    ///
+    /// The API requires both parameters and returns an empty list for a
+    /// combination the user has no record of, which is not an error: most people
+    /// have records in a handful of the several hundred mode/language pairs.
+    pub async fn personal_bests(
+        &self,
+        mode: Mode,
+        language: &str,
+    ) -> Result<Vec<PersonalBest>, ApiError> {
+        let path = format!(
+            "/users/personalBests?mode={}&language={}",
+            mode.as_str(),
+            language
+        );
+        self.get(&path).await
+    }
+}
+
+/// The language a result payload reports.
+///
+/// The server validates this against its own list of ids, so a name that only
+/// exists on this side has to be reduced to the base language rather than
+/// rejected. `english_5k` is a real published id and `english_5k_test` is not.
+pub fn language_for_submission(id: &str) -> String {
+    id.to_owned()
 }
 
 /// Maps a monkeytype error status onto [`ApiError`].
@@ -146,6 +323,23 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_key_is_distinguishable_from_a_network_failure() {
+        // "Your ApeKey is wrong" is something the user can fix; a dead network
+        // is not, and telling them to check their key for one is a red herring.
+        assert!(ApiError::Status {
+            code: 401,
+            message: "Unauthorized".to_owned()
+        }
+        .is_auth_failure());
+        assert!(!ApiError::Status {
+            code: 500,
+            message: "boom".to_owned()
+        }
+        .is_auth_failure());
+        assert!(!ApiError::Decode("no".to_owned()).is_auth_failure());
+    }
+
+    #[test]
     fn trailing_slashes_are_normalised() {
         let client = ApiClient::new("https://api.monkeytype.com/", "");
         assert_eq!(client.base_url, "https://api.monkeytype.com");
@@ -166,10 +360,131 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_with_no_name_says_so_rather_than_rendering_blank() {
+        let profile = Profile {
+            uid: "u".to_owned(),
+            name: String::new(),
+            streak: 0,
+            lb_opt_out: false,
+            banned: false,
+        };
+        assert_eq!(profile.display_name(), "anonymous");
+    }
+
+    #[test]
     fn envelope_reads_the_data_field() {
         let json = r#"{"status":200,"data":{"uid":"u_2"}}"#;
         let envelope: Envelope<Profile> = serde_json::from_str(json).expect("decodes");
         assert_eq!(envelope.status, 200);
         assert_eq!(envelope.data.expect("data").uid, "u_2");
+    }
+
+    /// A real `personalBests` entry, which is a bare object inside a list.
+    #[test]
+    fn a_personal_best_reads_the_shape_the_api_sends() {
+        let json = r#"[{"_id":"65f0","language":"english","mode2":"30","wpm":118.42,"time":30.0,"timestamp":1717000000000}]"#;
+        let bests: Vec<PersonalBest> = serde_json::from_str(json).expect("decodes");
+        assert_eq!(bests.len(), 1);
+        assert_eq!(bests[0].language, "english");
+        assert_eq!(bests[0].length(), Some(30));
+        assert_eq!(bests[0].wpm, 118.42);
+    }
+
+    /// `mode2` is a string upstream but the schema accepts a number too, and a
+    /// client that only reads one of them silently sees no records at all.
+    #[test]
+    fn a_numeric_mode2_is_read_too() {
+        let json = r#"[{"language":"english","mode2":30,"wpm":100.0}]"#;
+        let bests: Vec<PersonalBest> = serde_json::from_str(json).expect("decodes");
+        assert_eq!(bests[0].mode2, "30");
+        assert_eq!(bests[0].length(), Some(30));
+    }
+
+    /// A record missing every optional field still decodes, so one unusual row
+    /// does not lose the whole list.
+    #[test]
+    fn a_sparse_record_still_decodes() {
+        let json = r#"[{"wpm":90.0}]"#;
+        let bests: Vec<PersonalBest> = serde_json::from_str(json).expect("decodes");
+        assert_eq!(bests[0].wpm, 90.0);
+        assert_eq!(bests[0].language, "");
+        assert_eq!(bests[0].length(), None);
+    }
+
+    /// Showing a record from a different language next to the current test would
+    /// be a lie with a number on it, so all three have to match.
+    #[test]
+    fn a_best_is_matched_on_mode_language_and_length() {
+        let bests = PersonalBests {
+            time: vec![
+                PersonalBest {
+                    language: "english".to_owned(),
+                    mode2: "30".to_owned(),
+                    wpm: 100.0,
+                    time: 30.0,
+                    timestamp: 0,
+                },
+                PersonalBest {
+                    language: "english".to_owned(),
+                    mode2: "60".to_owned(),
+                    wpm: 120.0,
+                    time: 60.0,
+                    timestamp: 0,
+                },
+                PersonalBest {
+                    language: "russian".to_owned(),
+                    mode2: "30".to_owned(),
+                    wpm: 140.0,
+                    time: 30.0,
+                    timestamp: 0,
+                },
+            ],
+            words: Vec::new(),
+            quote: Vec::new(),
+        };
+
+        assert_eq!(
+            bests
+                .best(Mode::Time, "english", Some(60))
+                .expect("a 60s record")
+                .wpm,
+            120.0
+        );
+        // The fastest record overall is in a different language, so it must not
+        // be offered as this test's best.
+        assert_eq!(
+            bests
+                .best(Mode::Time, "english", Some(30))
+                .expect("a 30s record")
+                .wpm,
+            100.0
+        );
+        assert!(
+            bests.best(Mode::Time, "klingon", Some(30)).is_none(),
+            "a language with no record must not borrow another language's"
+        );
+        assert!(bests.best(Mode::Quote, "english", None).is_none());
+    }
+
+    #[test]
+    fn a_missing_length_matches_the_fastest_record() {
+        let bests = PersonalBests {
+            time: vec![PersonalBest {
+                language: "english".to_owned(),
+                mode2: "60".to_owned(),
+                wpm: 120.0,
+                time: 60.0,
+                timestamp: 0,
+            }],
+            words: Vec::new(),
+            quote: Vec::new(),
+        };
+        assert_eq!(
+            bests
+                .best(Mode::Time, "english", None)
+                .expect("a record")
+                .wpm,
+            120.0
+        );
     }
 }

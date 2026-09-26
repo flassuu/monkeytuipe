@@ -156,7 +156,7 @@ pub fn per_key(log: &EventLog, targets: &[String], is_timed: bool) -> Vec<KeyUse
 }
 
 /// The key figures of a test, gathered together.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct KeyStats {
     /// Gaps between keystrokes, in milliseconds.
     pub spacing: Vec<f64>,

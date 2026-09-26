@@ -31,6 +31,9 @@ const CHART_ROWS: u16 = 12;
 /// Rows for the per-key breakdown.
 const KEYS_ROWS: u16 = 3;
 
+/// Rows for the submission line, which says where a result did and did not go.
+const SUBMIT_ROWS: u16 = 1;
+
 /// How many keys the breakdown shows.
 ///
 /// The site draws the whole keyboard. Here the keys a test actually used are the
@@ -81,12 +84,24 @@ impl Screen for Results {
                 frame,
             );
         }
-        if area.height > below + chart_height + keys_height {
-            render_footer(
-                Rect::new(area.x, area.y + area.height - 1, area.width, 1),
+        // The submission line sits just above the footer, and says plainly that
+        // a result was not saved when it was not. A footer that only offers keys
+        // would leave the user believing their test went somewhere.
+        let footer_y = area.y + area.height.saturating_sub(1);
+        let spare = area
+            .y
+            .saturating_add(area.height)
+            .saturating_sub(below + chart_height + keys_height);
+        if spare > 1 {
+            render_submit(
+                Rect::new(area.x, footer_y - 1, area.width, SUBMIT_ROWS),
+                app,
                 theme,
                 frame,
             );
+        }
+        if area.height > below + chart_height + keys_height {
+            render_footer(Rect::new(area.x, footer_y, area.width, 1), theme, frame);
         }
     }
 
@@ -231,6 +246,31 @@ fn label_of(key: KeyUse) -> String {
     } else {
         key.key.to_string()
     }
+}
+
+/// Where the finished test went.
+fn render_submit(area: Rect, app: &App, theme: Theme, frame: &mut Frame) {
+    let outcome = app.submit();
+    // The payload is computed either way: it is what a submission needs, and a
+    // hash that is quietly wrong is worse than one that is verifiably right.
+    let hashed = app
+        .submission_body()
+        .is_some_and(|b| !b.result.hash.is_empty());
+    let mut text = outcome.message();
+    if !hashed {
+        text.push_str(" (payload not prepared)");
+    }
+    let style = if outcome.was_saved() {
+        theme.correct_style()
+    } else {
+        theme.chrome()
+    };
+    frame.render_widget(
+        Paragraph::new(
+            Line::from(Span::styled(format!(" {text} "), style)).alignment(Alignment::Center),
+        ),
+        area,
+    );
 }
 
 fn render_footer(area: Rect, theme: Theme, frame: &mut Frame) {
