@@ -8,6 +8,7 @@ use anyhow::Context;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::action::Action;
+use crate::config::bar::{self, on_off, step, Bar, Field, LengthUnit};
 use crate::config::theme::Theme;
 use crate::config::Config;
 use crate::engine::{Mode, Test};
@@ -19,7 +20,8 @@ use crate::stats::{
 };
 use crate::terminal::Tui;
 use crate::words::language::{self, Language};
-use crate::words::{self, Options as WordOptions};
+use crate::words::quotes::{self, QuoteList};
+use crate::words::{self, variants, Options as WordOptions};
 
 /// How often the clock redraws. 100ms keeps the countdown readable without
 /// burning CPU on a redraw loop that has nothing to animate.
@@ -58,6 +60,25 @@ pub struct App {
     inbox: Receiver<Language>,
     /// The other half of `inbox`, kept so a fetch can be started at any time.
     inbox_sender: Sender<Language>,
+    /// Where a finished quote download is delivered.
+    ///
+    /// A second channel rather than a shared one because the two payloads are
+    /// different types: a word list and a quote list are not variants of a
+    /// download, and a shared enum would make every reader handle the case it
+    /// does not care about.
+    quote_inbox: Receiver<QuoteList>,
+    quote_sender: Sender<QuoteList>,
+    /// The settings bar: which field is selected.
+    ///
+    /// Separate from the settings screen, which is where the values that are not
+    /// a short list of choices live — the ApeKey, the custom text.
+    bar: Bar,
+    /// The quote list for a quote test, once it has been fetched.
+    quotes: Option<QuoteList>,
+    /// The language whose quotes are being fetched right now, if any.
+    quote_pending: Option<String>,
+    /// Why there is no quote, for the status line.
+    quote_note: Option<String>,
     /// Wall-clock reading of when the test began, if it has.
     anchor: Option<Instant>,
     /// Everything the typist did, with timings.
@@ -88,12 +109,19 @@ impl App {
     /// Builds an app from a loaded config, seeding a test so the UI is
     /// populated before the first keystroke.
     pub fn new(config: Config, config_path: PathBuf) -> Self {
-        let (tx, inbox) = channel();
+        let (tx, inbox) = channel::<Language>();
+        let (quote_tx, quote_inbox) = channel::<QuoteList>();
         let mut app = Self {
             inbox_sender: tx,
+            quote_sender: quote_tx,
+            quote_inbox,
             language: language::embedded(FALLBACK_LANGUAGE).expect("english is embedded"),
             requested: FALLBACK_LANGUAGE.to_owned(),
             pending: None,
+            bar: Bar::idle(),
+            quotes: None,
+            quote_pending: None,
+            quote_note: None,
             inbox,
             config,
             screen: ScreenState::default(),
@@ -107,6 +135,7 @@ impl App {
             results_shown: false,
         };
         app.start_language(app.config.test.language.clone());
+        app.start_quotes();
         app
     }
 
@@ -127,6 +156,11 @@ impl App {
             }
             None => self.language.id().to_owned(),
         }
+    }
+
+    /// The language being downloaded right now, if any.
+    pub fn pending_language(&self) -> Option<&str> {
+        self.pending.as_ref().map(|pending| pending.id.as_str())
     }
 
     /// Switches to a language, fetching it first if it is not in the binary.
@@ -173,6 +207,11 @@ impl App {
         self.inbox_sender.clone()
     }
 
+    /// A clone of the quote receiver's sender half, for a fetch to report back on.
+    fn quote_tx(&self) -> Sender<QuoteList> {
+        self.quote_sender.clone()
+    }
+
     fn install(&mut self, language: Language) {
         self.language = language;
         self.pending = None;
@@ -181,6 +220,11 @@ impl App {
 
     /// Builds a fresh word list from the current language and config, and starts
     /// a new test with it.
+    ///
+    /// Three of the five modes do not go through the generator at all: a custom
+    /// test types the user's own passage, a quote test a published one, and zen
+    /// has no target. Running those through the generator would apply punctuation
+    /// and difficulty rules to text that already has its own.
     pub fn regenerate(&mut self) {
         let options = WordOptions {
             count: self.word_count(),
@@ -189,7 +233,16 @@ impl App {
             difficulty: self.config.test.difficulty,
             zipf: self.config.test.zipf,
         };
-        let words = words::Generator::new(&self.language, options).generate();
+        let words = match self.config.test.mode {
+            crate::config::Mode::Custom => self.custom_words(),
+            crate::config::Mode::Quote => self.quote_words(),
+            // Zen is typed against nothing, so one blank word is all it needs to
+            // start; the engine makes the rest as they are committed.
+            crate::config::Mode::Zen => vec![String::new()],
+            crate::config::Mode::Time | crate::config::Mode::Words => {
+                words::Generator::new(&self.language, options).generate()
+            }
+        };
         self.test = Test::new(words, self.test_mode(), self.test_length());
         self.reset_clock();
         self.log.clear();
@@ -203,30 +256,351 @@ impl App {
     /// very function — and keeping a second copy of the settings in the engine
     /// is how `mode = "words"` in a config file ends up ignored.
     fn test_mode(&self) -> Mode {
+        use crate::config::Mode as ConfigMode;
         match self.config.test.mode {
-            crate::config::Mode::Time => Mode::Time,
-            crate::config::Mode::Words => Mode::Words,
-            crate::config::Mode::Quote => Mode::Quote,
+            ConfigMode::Time => Mode::Time,
+            ConfigMode::Words => Mode::Words,
+            ConfigMode::Quote => Mode::Quote,
+            ConfigMode::Zen => Mode::Zen,
+            ConfigMode::Custom => Mode::Custom,
         }
     }
 
     /// Seconds for a timed test, words for a word-count one, and nothing for a
     /// quote, whose length is the passage's own.
     fn test_length(&self) -> u32 {
+        use crate::config::Mode as ConfigMode;
         match self.config.test.mode {
-            crate::config::Mode::Time => self.config.test.time,
-            crate::config::Mode::Words => self.config.test.words,
-            crate::config::Mode::Quote => 0,
+            ConfigMode::Time => self.config.test.time,
+            ConfigMode::Words => self.config.test.words,
+            // A passage's length is the passage's own, and zen has none.
+            ConfigMode::Quote | ConfigMode::Custom | ConfigMode::Zen => 0,
+        }
+    }
+
+    /// The passage a custom test types.
+    ///
+    /// The **first** line, always. The website picks one of the pasted lines at
+    /// random, which is fine when the test is a one-off but makes a passage
+    /// impossible to come back to — and a passage you cannot come back to is not
+    /// something you can practise. So this takes the first line and leaves the
+    /// choice to the order they are written in the file.
+    fn custom_words(&self) -> Vec<String> {
+        let Some(passage) = self.config.test.custom_text.first() else {
+            // No text at all. An empty test would finish instantly and report a
+            // result of nothing, so the fallback is a word the typist has to
+            // delete, which is visible.
+            return vec!["custom text is empty".to_owned()];
+        };
+        let words: Vec<String> = passage
+            .split(' ')
+            .filter(|word| !word.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if words.is_empty() {
+            return vec!["custom text is empty".to_owned()];
+        }
+        words
+    }
+
+    /// The quote a quote test types.
+    fn quote_words(&self) -> Vec<String> {
+        let Some(list) = &self.quotes else {
+            return vec!["quotes are still downloading".to_owned()];
+        };
+        let length = self.config.test.quote_length;
+        match list.pick(length) {
+            Some(quote) => quote
+                .text_for(false)
+                .split(' ')
+                .filter(|word| !word.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            None => {
+                // Say which buckets are empty rather than "no quotes found": a
+                // language with no long quotes and a language with no quotes at
+                // all are different problems.
+                let missing = list
+                    .counts()
+                    .into_iter()
+                    .filter(|(bucket, count)| *bucket != length && *count > 0)
+                    .map(|(bucket, _)| bucket.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if missing.is_empty() {
+                    vec![format!("no quotes for {} in this language", list.language)]
+                } else {
+                    vec![format!(
+                        "no {} quotes; this language has {}",
+                        length.as_str(),
+                        missing
+                    )]
+                }
+            }
+        }
+    }
+
+    /// Starts a quote download for a quote test, if one is needed.
+    ///
+    /// Same shape as [`Self::start_language`]: the download runs in the
+    /// background and the test is built with a placeholder until it lands, so the
+    /// first frame never waits on the network. A 2.3 MB file is a long wait and
+    /// blocking on it would look like a hang.
+    pub fn start_quotes(&mut self) {
+        if self.config.test.mode != crate::config::Mode::Quote {
+            return;
+        }
+        let base = variants::base_of(&self.config.test.language).to_owned();
+        if let Some(list) = &self.quotes {
+            if list.language == base {
+                self.quote_note = None;
+                self.regenerate();
+                return;
+            }
+        }
+        // Already cached: use it now rather than going near the network.
+        if quotes::is_available_offline(&base) {
+            match quotes::load_cached(&base) {
+                Ok(list) if !list.is_empty() => {
+                    self.quotes = Some(list);
+                    self.quote_pending = None;
+                    self.quote_note = None;
+                    self.regenerate();
+                    return;
+                }
+                Ok(_) => {
+                    self.quotes = None;
+                    self.quote_pending = None;
+                    self.quote_note = Some("the quote file was empty".to_owned());
+                    return;
+                }
+                Err(err) => {
+                    self.quote_note = Some(err.to_string());
+                    return;
+                }
+            }
+        }
+        self.quotes = None;
+        self.quote_note = None;
+        if self.quote_pending.as_deref() == Some(base.as_str()) {
+            return;
+        }
+        self.quote_pending = Some(base.clone());
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let tx = self.quote_tx();
+        handle.spawn(async move {
+            if let Ok(list) = quotes::fetch(&base).await {
+                let _ = tx.send(list);
+            }
+        });
+    }
+
+    /// A short note about the quote list, for the status line.
+    pub fn quote_status(&self) -> Option<String> {
+        if let Some(language) = &self.quote_pending {
+            return Some(format!("{language} quotes ↓"));
+        }
+        self.quote_note.clone()
+    }
+
+    /// Picks up a quote list a background download has finished with.
+    fn drain_quotes(&mut self) {
+        while let Ok(list) = self.quote_inbox.try_recv() {
+            self.quote_pending = None;
+            self.quote_note = if list.is_empty() {
+                Some("the quote file was empty".to_owned())
+            } else {
+                None
+            };
+            self.quotes = (!list.is_empty()).then_some(list);
+            self.regenerate();
         }
     }
 
     /// How many words the test needs.
     fn word_count(&self) -> usize {
+        use crate::config::Mode as ConfigMode;
         match self.config.test.mode {
-            crate::config::Mode::Time => WordOptions::for_duration(self.config.test.time).count,
-            crate::config::Mode::Words => self.config.test.words as usize,
-            crate::config::Mode::Quote => 100,
+            ConfigMode::Time => WordOptions::for_duration(self.config.test.time).count,
+            ConfigMode::Words => self.config.test.words as usize,
+            // A quote is whatever the quote turns out to be, and zen needs only
+            // enough words to get going: it makes its own as you go.
+            ConfigMode::Quote | ConfigMode::Custom => 100,
+            ConfigMode::Zen => 25,
         }
+    }
+
+    // ---- the settings bar -----------------------------------------------
+
+    /// The fields the bar shows, in order, for the current mode.
+    pub fn bar_fields(&self) -> Vec<Field> {
+        Bar::fields(self.config.test.mode)
+    }
+
+    /// The field the bar has selected.
+    ///
+    /// Always a field the bar actually shows: changing mode can shorten the bar
+    /// under a selection, so the index is clamped rather than trusted.
+    pub fn bar_field(&self) -> Field {
+        let fields = self.bar_fields();
+        fields
+            .get(self.bar.selected())
+            .copied()
+            // A bar with no fields cannot be navigated, and this keeps the
+            // accessor total rather than an Option every screen has to unwrap.
+            .unwrap_or(Field::Mode)
+    }
+
+    /// Which field is selected, as an index into [`Self::bar_fields`].
+    pub fn bar_selection(&self) -> usize {
+        self.bar
+            .selected()
+            .min(self.bar_fields().len().saturating_sub(1))
+    }
+
+    /// Moves the bar's selection, clamped to the fields that exist.
+    pub fn move_bar_selection(&mut self, by: isize) {
+        self.bar.move_selection(by, self.bar_fields().len());
+    }
+
+    /// What a field currently says.
+    ///
+    /// The mode and the length are shown as the value alone, everything else as
+    /// `label value`, which is the arrangement the website's buttons use.
+    pub fn bar_value(&self, field: Field) -> String {
+        let test = &self.config.test;
+        match field {
+            Field::Mode => test.mode.bar_label().to_owned(),
+            Field::Length => match test.mode.length_unit() {
+                Some(unit) => unit.render(self.bar_length()),
+                None => "∞".to_owned(),
+            },
+            Field::QuoteLength => test.quote_length.as_str().to_owned(),
+            Field::Punctuation => on_off(test.punctuation),
+            Field::Numbers => on_off(test.numbers),
+            Field::Difficulty => test.difficulty.as_str().to_owned(),
+            Field::CustomText => match test.custom_text.first() {
+                Some(text) => {
+                    let words = text.split(' ').filter(|w| !w.is_empty()).count();
+                    format!("{} words", words)
+                }
+                None => "not set".to_owned(),
+            },
+            Field::Language => {
+                let label = variants::Language {
+                    id: test.language.clone(),
+                    base: variants::base_of(&test.language).to_owned(),
+                    words: self.language.words.len() as u32,
+                    embedded: language::embedded(&test.language).is_some(),
+                };
+                label.label()
+            }
+            Field::Blind => on_off(test.blind),
+        }
+    }
+
+    /// The bar's length, as the mode counts it.
+    fn bar_length(&self) -> u32 {
+        match self.config.test.mode {
+            crate::config::Mode::Time => self.config.test.time,
+            crate::config::Mode::Words => self.config.test.words,
+            _ => 0,
+        }
+    }
+
+    /// Changes a field by `by` steps, and rebuilds the test so the change can be
+    /// seen before it is typed.
+    ///
+    /// Fields with no short list of choices — the custom text — are left alone
+    /// rather than cycled: they are typed on the settings screen, and a field
+    /// that silently does nothing when you press the key is worse than one that
+    /// says so.
+    pub fn change_bar_field(&mut self, field: Field, by: i8) {
+        let by = by as isize;
+        // Read before the borrow: switching language needs `self` immutably to
+        // work out which variants exist, and the config mutably to store the new
+        // one, so the two cannot be held at once.
+        let variants_now = (field == Field::Language).then(|| self.language_variants());
+        let test = &mut self.config.test;
+        let mut needs_words = true;
+        let mut needs_quotes = false;
+        let mut needs_language = false;
+
+        match field {
+            Field::Mode => {
+                let current = bar::MODES.iter().position(|m| *m == test.mode);
+                test.mode = bar::MODES[step(current, by, bar::MODES.len())];
+                needs_quotes = test.mode == crate::config::Mode::Quote;
+            }
+            Field::Length => match test.mode.length_unit() {
+                Some(LengthUnit::Seconds) => {
+                    let current = bar::TIMES.iter().position(|t| *t == test.time);
+                    test.time = bar::TIMES[step(current, by, bar::TIMES.len())];
+                }
+                Some(LengthUnit::Words) => {
+                    let current = bar::WORD_COUNTS.iter().position(|w| *w == test.words);
+                    test.words = bar::WORD_COUNTS[step(current, by, bar::WORD_COUNTS.len())];
+                }
+                // Zen and quote have no length to choose.
+                None => return,
+            },
+            Field::QuoteLength => {
+                let current = bar::QUOTE_LENGTHS
+                    .iter()
+                    .position(|q| *q == test.quote_length);
+                test.quote_length = bar::QUOTE_LENGTHS[step(current, by, bar::QUOTE_LENGTHS.len())];
+            }
+            Field::Punctuation => test.punctuation = !test.punctuation,
+            Field::Numbers => test.numbers = !test.numbers,
+            Field::Blind => test.blind = !test.blind,
+            Field::Difficulty => {
+                let current = bar::DIFFICULTIES.iter().position(|d| *d == test.difficulty);
+                test.difficulty = bar::DIFFICULTIES[step(current, by, bar::DIFFICULTIES.len())];
+            }
+            Field::CustomText => return,
+            Field::Language => {
+                needs_language = true;
+                let Some(ids) = variants_now else {
+                    return;
+                };
+                let Some(current) = ids.iter().position(|id| *id == test.language) else {
+                    return;
+                };
+                let next = step(Some(current), by, ids.len());
+                test.language = ids[next].clone();
+            }
+        }
+
+        self.dirty = true;
+        // Zen makes its own words, so there is nothing to build.
+        if test.mode == crate::config::Mode::Zen {
+            needs_words = false;
+        }
+        if needs_language {
+            let id = self.config.test.language.clone();
+            self.start_language(id);
+            return;
+        }
+        if needs_quotes {
+            self.start_quotes();
+            return;
+        }
+        if needs_words {
+            self.regenerate();
+        }
+    }
+
+    /// The word-list ids the bar cycles through for the current base language.
+    ///
+    /// The base list plus every sized variant that is embedded or already cached.
+    /// A variant that is neither is not offered, because a picker full of entries
+    /// that fail to download is worse than one that grows as the cache does.
+    pub fn language_variants(&self) -> Vec<String> {
+        let base = variants::base_of(&self.config.test.language).to_owned();
+        let cached = |id: &str| words::fetch::is_available_offline(id);
+        variants::available(&base, &cached)
     }
 
     // ---- accessors used by screens -------------------------------------
@@ -356,7 +730,7 @@ impl App {
                 let left = f64::from(self.test.mode2()) - self.elapsed_secs();
                 format!("{:>3}s", left.ceil().max(0.0) as u32)
             }
-            Mode::Words | Mode::Quote => {
+            Mode::Words | Mode::Quote | Mode::Custom => {
                 let total = self.test.words().len() as u32;
                 format!(
                     "{}/{}",
@@ -364,6 +738,10 @@ impl App {
                     total
                 )
             }
+            // Zen has no total: it makes words as it goes. A running count of
+            // words typed is the one number that is meaningful in a mode with no
+            // target, so that is what this shows.
+            Mode::Zen => format!("{}w", self.cursor_word()),
         }
     }
 
@@ -453,6 +831,7 @@ impl App {
     /// never depend on when a keystroke happened to arrive.
     pub fn tick(&mut self) {
         self.drain_languages();
+        self.drain_quotes();
         if !self.test.is_finished() {
             if let Some(anchor) = self.anchor {
                 self.elapsed = anchor.elapsed();
@@ -652,6 +1031,15 @@ impl App {
             }
             Effect::Adjust(row) => {
                 self.adjust(row);
+                false
+            }
+            Effect::MoveBar(by) => {
+                self.move_bar_selection(isize::from(by));
+                false
+            }
+            Effect::ChangeBar(by) => {
+                let field = self.bar_field();
+                self.change_bar_field(field, by);
                 false
             }
             Effect::Toggle(row) => {
@@ -1502,6 +1890,261 @@ mod tests {
         // word was right — the other two were typed as "a" — and a word-count
         // test credits nothing that is not exact.
         assert_eq!(app.result().expect("a result").wpm, 48.0);
+    }
+
+    // ---- the settings bar -----------------------------------------------
+
+    fn app_with_test(mode: crate::config::Mode) -> App {
+        let mut config = Config::default();
+        config.test.mode = mode;
+        App::new(config, PathBuf::from("/nonexistent/config.toml"))
+    }
+
+    /// Every mode the bar can be in, so a rule about the bar is checked against
+    /// all of them rather than against whichever one was on screen.
+    fn every_mode() -> Vec<App> {
+        bar::MODES.iter().map(|m| app_with_test(*m)).collect()
+    }
+
+    #[test]
+    fn the_bar_shows_the_mode_first_in_every_mode() {
+        for app in every_mode() {
+            assert_eq!(
+                app.bar_field(),
+                Field::Mode,
+                "in {:?}",
+                app.config.test.mode
+            );
+        }
+    }
+
+    /// The selection is an index into a list whose length changes with the mode.
+    /// Leaving it past the end means a bar with nothing selected and arrows that
+    /// go nowhere.
+    #[test]
+    fn the_selection_survives_a_change_of_mode() {
+        let mut app = app_with_test(crate::config::Mode::Words);
+        // Walk to the far end of the longest bar.
+        for _ in 0..10 {
+            app.move_bar_selection(1);
+        }
+        assert_eq!(app.bar_selection(), app.bar_fields().len() - 1);
+
+        for mode in bar::MODES {
+            app.change_bar_field(Field::Mode, 0);
+            // Whatever the mode now is, the selection names a field that exists.
+            let fields = app.bar_fields();
+            assert!(
+                app.bar_selection() < fields.len(),
+                "{mode:?} left the selection past the end"
+            );
+        }
+    }
+
+    #[test]
+    fn the_arrows_move_the_selection_and_never_escape_the_bar() {
+        let mut app = app_with_test(crate::config::Mode::Time);
+        for _ in 0..20 {
+            app.move_bar_selection(-1);
+        }
+        assert_eq!(app.bar_selection(), 0, "it went off the left edge");
+        for _ in 0..20 {
+            app.move_bar_selection(1);
+        }
+        assert_eq!(app.bar_selection(), app.bar_fields().len() - 1);
+    }
+
+    #[test]
+    fn up_and_down_change_the_selected_field() {
+        let mut app = app_with_test(crate::config::Mode::Time);
+        app.move_bar_selection(1); // the length
+        assert_eq!(app.bar_field(), Field::Length);
+        assert_eq!(app.bar_value(Field::Length), "30s");
+
+        app.change_bar_field(app.bar_field(), 1);
+        assert_eq!(app.config.test.time, 60);
+        app.change_bar_field(app.bar_field(), -1);
+        assert_eq!(
+            app.config.test.time, 30,
+            "a value is a ring, so up goes back"
+        );
+    }
+
+    /// A value has to come back to where it started, or one direction is a dead
+    /// end.
+    #[test]
+    fn every_ring_comes_back_round() {
+        let mut app = app_with_test(crate::config::Mode::Time);
+        for field in [Field::Mode, Field::Length, Field::Difficulty] {
+            let before = app.bar_value(field);
+            let rounds = match field {
+                Field::Mode => bar::MODES.len(),
+                Field::Length => bar::TIMES.len(),
+                _ => bar::DIFFICULTIES.len(),
+            };
+            for _ in 0..rounds {
+                app.change_bar_field(field, 1);
+            }
+            assert_eq!(app.bar_value(field), before, "{field:?} did not come round");
+        }
+    }
+
+    #[test]
+    fn a_toggle_flips_rather_than_cycling() {
+        let mut app = app_with_test(crate::config::Mode::Time);
+        for field in [Field::Punctuation, Field::Numbers, Field::Blind] {
+            let before = app.bar_value(field);
+            app.change_bar_field(field, 1);
+            assert_ne!(app.bar_value(field), before, "{field:?} did not flip");
+            app.change_bar_field(field, 1);
+            assert_eq!(app.bar_value(field), before, "{field:?} did not flip back");
+        }
+    }
+
+    /// Zen and quote have no length, so a keypress that would change one has to
+    /// do nothing visible rather than spin a value that is not on the bar.
+    #[test]
+    fn a_mode_with_no_length_ignores_a_length_change() {
+        for mode in [crate::config::Mode::Zen, crate::config::Mode::Quote] {
+            let mut app = app_with_test(mode);
+            let before = app.config.test.time;
+            app.change_bar_field(Field::Length, 1);
+            assert_eq!(app.config.test.time, before, "{mode:?}");
+        }
+    }
+
+    /// The custom text is typed on the settings screen, not cycled here.
+    #[test]
+    fn the_custom_text_is_not_cycled_by_the_bar() {
+        let mut app = app_with_test(crate::config::Mode::Custom);
+        app.config.test.custom_text = vec!["a passage".to_owned()];
+        let before = app.bar_value(Field::CustomText);
+        app.change_bar_field(Field::CustomText, 1);
+        assert_eq!(app.bar_value(Field::CustomText), before);
+        assert_eq!(app.bar_value(Field::CustomText), "2 words");
+    }
+
+    /// Every mode the bar offers must actually build a test. A mode that produced
+    /// an empty word list would leave the typing screen blank.
+    #[test]
+    fn every_mode_builds_a_usable_test() {
+        for mode in bar::MODES {
+            let app = app_with_test(mode);
+            let words = app.test().words();
+            assert!(!words.is_empty(), "{mode:?} produced no words");
+            assert!(
+                app.test().mode().is_scored() == (mode != crate::config::Mode::Zen),
+                "{mode:?} disagrees about being scored"
+            );
+        }
+    }
+
+    /// A custom test types the user's own text, not a generated word list.
+    #[test]
+    fn a_custom_test_types_the_passage_it_was_given() {
+        let mut app = app_with_test(crate::config::Mode::Custom);
+        app.config.test.custom_text = vec!["one two three".to_owned()];
+        app.regenerate();
+        let typed: Vec<&str> = app.test().words().iter().map(|w| w.text()).collect();
+        assert_eq!(typed, ["one", "two", "three"]);
+    }
+
+    /// Punctuation and numbers are generator settings, so they must not be
+    /// applied to a passage that already has its own.
+    #[test]
+    fn a_custom_test_ignores_the_generator_settings() {
+        let mut app = app_with_test(crate::config::Mode::Custom);
+        app.config.test.punctuation = true;
+        app.config.test.numbers = true;
+        app.config.test.custom_text = vec!["Hello, world. 42!".to_owned()];
+        app.regenerate();
+        let typed: Vec<&str> = app.test().words().iter().map(|w| w.text()).collect();
+        assert_eq!(typed, ["Hello,", "world.", "42!"]);
+    }
+
+    /// An empty passage would finish instantly and report nothing.
+    #[test]
+    fn a_custom_test_with_no_text_says_so_instead_of_being_empty() {
+        let mut app = app_with_test(crate::config::Mode::Custom);
+        app.regenerate();
+        assert_eq!(app.test().words().len(), 1);
+        assert!(app.test().words()[0].text().contains("empty"));
+    }
+
+    /// With no quote downloaded yet there is still something on screen, and it
+    /// says what is wrong rather than being blank.
+    #[test]
+    fn a_quote_test_without_quotes_says_so() {
+        let app = app_with_test(crate::config::Mode::Quote);
+        assert_eq!(app.test().words().len(), 1);
+        assert!(app.test().words()[0].text().contains("download"));
+    }
+
+    /// Zen is endless: committing a word must produce another one rather than
+    /// ending the test.
+    #[test]
+    fn a_zen_test_never_runs_out_of_words() {
+        let mut app = app_with_test(crate::config::Mode::Zen);
+        for _ in 0..50 {
+            app.set_elapsed(Duration::from_millis(100));
+            for c in "hello ".chars() {
+                app.type_char(c);
+            }
+        }
+        assert!(!app.test().is_finished(), "zen ended");
+        assert!(app.test().words().len() > 50, "zen ran out of words");
+    }
+
+    /// Zen has no target, so the countdown is a count of words rather than a
+    /// count of seconds — there is no total to count down to.
+    #[test]
+    fn a_zen_test_shows_a_word_count_rather_than_a_clock() {
+        let mut app = app_with_test(crate::config::Mode::Zen);
+        assert_eq!(app.countdown(), "0w");
+        for c in "one two ".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(app.countdown(), "2w");
+    }
+
+    #[test]
+    fn changing_a_setting_rebuilds_the_test_so_the_choice_can_be_seen() {
+        let mut app = app_with_test(crate::config::Mode::Words);
+        let before: Vec<String> = app
+            .test()
+            .words()
+            .iter()
+            .map(|w| w.text().to_owned())
+            .collect();
+        app.change_bar_field(Field::Length, 1); // 25 -> 50
+        let after: Vec<String> = app
+            .test()
+            .words()
+            .iter()
+            .map(|w| w.text().to_owned())
+            .collect();
+        assert_eq!(app.test().words().len(), 50, "the new length took effect");
+        assert_ne!(before, after, "and it is a different set of words");
+    }
+
+    #[test]
+    fn a_setting_change_marks_the_config_dirty() {
+        let mut app = app_with_test(crate::config::Mode::Time);
+        assert!(!app.is_dirty());
+        app.change_bar_field(Field::Punctuation, 1);
+        assert!(app.is_dirty(), "the change would not be saved");
+    }
+
+    /// The bar and the settings screen both change the config, so a change made
+    /// in one has to be visible in the other.
+    #[test]
+    fn the_bar_and_the_settings_screen_agree() {
+        let mut app = app_with_test(crate::config::Mode::Time);
+        app.move_bar_selection(2); // punctuation
+        assert_eq!(app.bar_field(), Field::Punctuation);
+        let before = app.config.test.punctuation;
+        app.change_bar_field(Field::Punctuation, 1);
+        assert_ne!(app.config.test.punctuation, before);
     }
 
     #[test]

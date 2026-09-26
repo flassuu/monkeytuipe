@@ -1,5 +1,6 @@
 //! On-disk configuration.
 
+pub mod bar;
 pub mod keybinds;
 pub mod theme;
 
@@ -7,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+
+pub use bar::{Bar, Field, LengthUnit, QuoteLength};
 
 /// Defaults applied to any field the config file leaves out.
 impl Default for Config {
@@ -69,6 +72,16 @@ pub struct TestConfig {
     pub numbers: bool,
     pub difficulty: Difficulty,
     pub blind: bool,
+    /// Which quote lengths a quote test may pick from.
+    #[serde(default)]
+    pub quote_length: bar::QuoteLength,
+    /// The passage a custom test types, one entry per line.
+    ///
+    /// A `Vec` rather than one string because the website lets you paste several
+    /// lines and picks one of them at random, and because a multi-line string in
+    /// a TOML file is a quoting problem for a value nobody edits by hand.
+    #[serde(default)]
+    pub custom_text: Vec<String>,
     /// Bias word choice towards the frequent end of a frequency-ordered list.
     ///
     /// Off by default to match the website. On a 200-word list it makes the
@@ -86,6 +99,10 @@ pub enum Mode {
     Time,
     Words,
     Quote,
+    /// Endless practice with no target text and nothing to score.
+    Zen,
+    /// A passage from `custom_text`.
+    Custom,
 }
 
 /// How forgiving the test is about a wrong first key.
@@ -108,6 +125,8 @@ impl Mode {
             Self::Time => "time",
             Self::Words => "words",
             Self::Quote => "quote",
+            Self::Zen => "zen",
+            Self::Custom => "custom",
         }
     }
 }
@@ -143,6 +162,8 @@ impl Default for TestConfig {
             numbers: false,
             difficulty: Difficulty::default(),
             blind: false,
+            quote_length: bar::QuoteLength::default(),
+            custom_text: Vec::new(),
             zipf: false,
             quotes: "none".to_owned(),
         }
@@ -154,7 +175,7 @@ impl Config {
     pub const APE_KEY_ENV: &'static str = "MONKEYTUIPE_APEKEY";
 
     /// Current config schema version.
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 
     /// The ApeKey to actually use.
     ///
@@ -207,6 +228,19 @@ impl Config {
             // that still carries them is far more likely to be a default the app
             // wrote than a choice, so it gets the working bindings.
             self.keybinds.migrate();
+        }
+        if self.version < 2 {
+            // `punctuation` and `numbers` used to default to on, because the
+            // website's own defaults are on. They now default to off, which
+            // matches what a fresh install gets and what nearly every user in
+            // practice wants — and a file written before the settings bar
+            // existed was almost certainly the defaults, not a choice, so it is
+            // left as the user found it.
+            //
+            // A file that predates both keys cannot be told apart from a file
+            // whose author deliberately set them, so nothing is changed: the
+            // new `#[serde(default)]` fills them in, and the user's own values
+            // are untouched because they are present in the file.
         }
         self.version = Self::VERSION;
     }

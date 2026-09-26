@@ -29,6 +29,10 @@ pub enum Mode {
     Words,
     /// A fixed passage; the final word ends with a newline rather than a space.
     Quote,
+    /// Endless practice with no target text and nothing to score.
+    Zen,
+    /// A passage the user typed in themselves, run to the end.
+    Custom,
 }
 
 impl Mode {
@@ -44,8 +48,26 @@ impl Mode {
     ///
     /// A word-count test of zero words is "as many as you can in no time at
     /// all", which the website treats as timed, so the phrase carries over.
+    /// Zen is timed too, or it would have no clock to run on.
     pub fn is_timed(self, mode2: u32) -> bool {
-        matches!(self, Mode::Time) || (self == Mode::Words && mode2 == 0)
+        matches!(self, Mode::Time | Mode::Zen) || (self == Mode::Words && mode2 == 0)
+    }
+
+    /// Whether the test has a target to be scored against.
+    ///
+    /// Zen has none, which is the whole point of it: there is nothing to be right
+    /// or wrong about, so the result screen says so rather than showing zeros
+    /// that look like a failed test.
+    pub fn is_scored(self) -> bool {
+        self != Mode::Zen
+    }
+
+    /// Whether the word list runs out.
+    ///
+    /// Zen does not: the engine appends a fresh empty word as each one is
+    /// committed, so a zen test can run until the clock stops it.
+    pub fn is_endless(self) -> bool {
+        self == Mode::Zen
     }
 }
 
@@ -82,13 +104,16 @@ impl Test {
     /// website does: in quote mode the passage ends with a line break rather
     /// than another space.
     pub fn new(texts: Vec<String>, mode: Mode, mode2: u32) -> Self {
-        let last_is_quote_end = mode == Mode::Quote;
+        // A passage ends with a line break rather than another space, which is
+        // what the website does for both quotes and custom text. Zen is neither:
+        // it never ends.
+        let last_is_passage_end = matches!(mode, Mode::Quote | Mode::Custom);
         let count = texts.len();
         let words = texts
             .into_iter()
             .enumerate()
             .map(|(i, text)| {
-                let commit = if last_is_quote_end && i + 1 == count {
+                let commit = if last_is_passage_end && i + 1 == count {
                     '\n'
                 } else {
                     ' '
@@ -245,7 +270,7 @@ impl Test {
 
     /// Whether the test should stop now, for a reason other than the clock.
     pub fn is_complete(&self) -> bool {
-        self.active >= self.words.len()
+        !self.mode.is_endless() && self.active >= self.words.len()
     }
 
     fn active_word_mut(&mut self) -> &mut Word {
@@ -268,6 +293,16 @@ impl Test {
     fn advance(&mut self) {
         if self.active < self.words.len() {
             self.active += 1;
+        }
+        if self.mode.is_endless() {
+            // Zen keeps going: a fresh blank word appears as the last one is
+            // committed. Appending rather than reusing the last word is what
+            // keeps its characters from being committed twice, and it is why a
+            // zen test's word count grows as you type.
+            if self.active >= self.words.len() {
+                self.words.push(Word::new(String::new(), ' '));
+            }
+            return;
         }
         if self.is_complete() {
             self.finish();

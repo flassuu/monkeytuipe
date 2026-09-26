@@ -16,7 +16,7 @@ use crate::action::Action;
 use crate::app::App;
 use crate::config::theme::Theme;
 use crate::engine::{Word, WordState};
-use crate::screens::{Effect, Screen, ScreenKind};
+use crate::screens::{config_bar, Effect, Screen, ScreenKind};
 use crate::widgets;
 
 /// How many rows the live chart takes on the typing screen.
@@ -47,12 +47,18 @@ pub struct Typing;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypingRows {
     pub header: Rect,
+    pub bar: Rect,
     pub words: Rect,
     pub chart: Rect,
     pub counters: Rect,
 }
 
 /// Splits a screen into the typing screen's bands.
+///
+/// `bar_rows` is how many rows the settings bar needs, which depends on how many
+/// fields the current mode has and how wide the terminal is — so it is measured
+/// from the cells rather than assumed. A bar given one row and needing two gets
+/// truncated, and a truncated settings bar hides settings.
 ///
 /// The words come first, because a test with no room for the words is a test you
 /// cannot see and the chart is decoration. So the chart is drawn out of what is
@@ -61,12 +67,18 @@ pub struct TypingRows {
 /// would give the fixed-height rows priority and leave the words nothing.
 ///
 /// The header and the counters always keep their row, because they are the only
-/// place the word list and the numbers live.
-pub fn rows_for(area: Rect) -> TypingRows {
+/// place the status and the numbers live.
+pub fn rows_for(area: Rect, bar_rows: u16) -> TypingRows {
     let bottom = area.y + area.height;
 
     let header = Rect::new(area.x, area.y, area.width, 1.min(area.height));
-    let cursor = area.y + header.height;
+    let bar = Rect::new(
+        area.x,
+        area.y + header.height,
+        area.width,
+        bar_rows.min(area.height.saturating_sub(header.height)),
+    );
+    let cursor = area.y + header.height + bar.height;
 
     let counters = Rect::new(
         area.x,
@@ -93,6 +105,7 @@ pub fn rows_for(area: Rect) -> TypingRows {
 
     TypingRows {
         header,
+        bar,
         words,
         chart,
         counters,
@@ -104,8 +117,9 @@ impl Screen for Typing {
         let theme = app.theme();
         frame.render_widget(Paragraph::new("").style(theme.base()), frame.area());
 
-        let rows = rows_for(frame.area());
+        let rows = rows_for(frame.area(), bar_rows(app, frame.area().width));
         render_header(app, frame, rows.header, theme);
+        config_bar::render(app, rows.bar, theme, frame);
         render_words(app, frame, rows.words, theme);
         render_chart(app, frame, rows.chart, theme);
         render_counters(app, frame, rows.counters, theme);
@@ -119,22 +133,48 @@ impl Screen for Typing {
             Action::Char(c) => vec![Effect::Type(c)],
             Action::Backspace => vec![Effect::Backspace],
             Action::Skip => vec![Effect::SkipWord],
-            // Navigation belongs to the settings screen; the words pane scrolls
-            // itself, so these have nothing to do here.
-            Action::Up
-            | Action::Down
-            | Action::Left
-            | Action::Right
-            | Action::Select
-            | Action::Back => Vec::new(),
+            // The arrows drive the settings bar, which is always on screen, so
+            // there is no mode to enter first. That is the trade the website
+            // makes with a mouse click and a terminal makes with a key that was
+            // doing nothing anyway.
+            Action::Up => vec![Effect::ChangeBar(-1)],
+            Action::Down => vec![Effect::ChangeBar(1)],
+            Action::Left => vec![Effect::MoveBar(-1)],
+            Action::Right => vec![Effect::MoveBar(1)],
+            // Enter and Escape are the settings screen's; there is nothing to
+            // confirm here because every change takes effect immediately.
+            Action::Select | Action::Back => Vec::new(),
         }
     }
 }
 
-/// The name on the left, the word list on the right, nothing in the middle.
+/// How many rows the settings bar needs at this width.
+///
+/// Public so a test can ask the same question the screen does: a test that
+/// assumed one row would be checking a layout the screen never draws.
+pub fn bar_rows(app: &App, width: u16) -> u16 {
+    let cells = config_bar::cells(app);
+    if cells.is_empty() || width == 0 {
+        return 0;
+    }
+    (config_bar::layout(&cells, width as usize, u16::MAX as usize).len() as u16)
+        .min(config_bar::ROWS)
+}
+
+/// The name on the left, whatever is downloading on the right.
+///
+/// The word list used to go here, but it is in the settings bar now, and a
+/// language named twice in two rows is one named in the wrong place if the two
+/// ever disagree.
 fn render_header(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
     let left = Span::styled(" monkeytuipe ", theme.heading());
-    let right = Span::styled(format!(" {} ", app.language_status()), theme.chrome());
+    let status = app
+        .quote_status()
+        .or_else(|| app.pending_language().map(|id| format!("{id} ↓")));
+    let right = match status {
+        Some(text) => Span::styled(format!(" {text} "), theme.chrome()),
+        None => Span::raw(""),
+    };
     let gap = (area.width as usize)
         .saturating_sub(1 + 13)
         .saturating_sub(right.content.chars().count());

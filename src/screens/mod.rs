@@ -5,6 +5,7 @@
 //! applies. That keeps the data flow one-directional and lets a screen be
 //! unit-tested without an `App`.
 
+pub mod config_bar;
 pub mod results;
 pub mod settings;
 pub mod typing;
@@ -33,6 +34,10 @@ pub enum Effect {
     Adjust(Row),
     /// Space on a settings row.
     Toggle(Row),
+    /// Move the settings bar's selection left (`-1`) or right (`1`).
+    MoveBar(i8),
+    /// Change the selected bar field: up (`-1`) or down (`1`).
+    ChangeBar(i8),
 }
 
 /// A screen identified by kind, for code that needs to name one.

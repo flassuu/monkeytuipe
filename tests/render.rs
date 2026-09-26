@@ -16,7 +16,7 @@ use ratatui::layout::Rect;
 use monkeytuipe::app::App;
 use monkeytuipe::config::theme::Theme;
 use monkeytuipe::config::Config;
-use monkeytuipe::screens::typing::rows_for;
+use monkeytuipe::screens::typing::{bar_rows, rows_for};
 use monkeytuipe::screens::ScreenKind;
 
 /// Renders the app at `width`x`height` and returns the buffer.
@@ -43,8 +43,8 @@ fn lines(buffer: &Buffer) -> Vec<String> {
 ///
 /// Taken from the screen's own layout rather than from row arithmetic, so a
 /// layout change moves this with it instead of quietly testing the wrong band.
-fn word_area(buffer: &Buffer) -> String {
-    area_text(buffer, rows_for(buffer.area).words)
+fn word_area(buffer: &Buffer, app: &App) -> String {
+    area_text(buffer, layout_of(app, buffer).words)
 }
 
 /// The text of one rectangle of the screen.
@@ -54,6 +54,11 @@ fn area_text(buffer: &Buffer, area: Rect) -> String {
         .map(|y| all.get(y as usize).cloned().unwrap_or_default())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The screen's own layout, so a test and the screen agree on where things are.
+fn layout_of(app: &App, buffer: &Buffer) -> monkeytuipe::screens::typing::TypingRows {
+    rows_for(buffer.area, bar_rows(app, buffer.area.width))
 }
 
 fn app() -> App {
@@ -73,10 +78,28 @@ fn single_char_words() -> Vec<String> {
 #[test]
 fn the_typing_screen_draws_its_header_and_counters() {
     let buffer = render(&app(), 100, 20);
-    let rows = rows_for(buffer.area);
+    let app = app();
+    let buffer = render(&app, 100, 20);
+    let rows = layout_of(&app, &buffer);
     let header = area_text(&buffer, rows.header);
     assert!(header.contains("monkeytuipe"), "no title in {header:?}");
-    assert!(header.contains("english"), "no word list in {header:?}");
+
+    // The settings bar: the fields the website puts above the words, and the
+    // one the user has selected.
+    let bar = area_text(&buffer, rows.bar);
+    for field in [
+        "time",
+        "punctuation",
+        "numbers",
+        "difficulty",
+        "language",
+        "blind",
+    ] {
+        assert!(
+            bar.contains(field),
+            "{field:?} missing from the bar: {bar:?}"
+        );
+    }
 
     let counters = area_text(&buffer, rows.counters);
     for expected in ["wpm", "acc", "time", "ctrl+c quit"] {
@@ -90,8 +113,9 @@ fn the_typing_screen_draws_its_header_and_counters() {
 /// The counters go on one line, the way the site shows them.
 #[test]
 fn the_counters_share_a_single_row() {
-    let buffer = render(&app(), 100, 20);
-    let counters = rows_for(buffer.area).counters;
+    let app = app();
+    let buffer = render(&app, 100, 20);
+    let counters = layout_of(&app, &buffer).counters;
     assert_eq!(counters.height, 1, "the counters get one row, not a block");
 
     let row: String = (counters.x..counters.x + counters.width)
@@ -111,7 +135,7 @@ fn the_words_are_centred() {
     let mut app = app();
     app.set_words(vec!["word".to_owned()]);
     let buffer = render(&app, 40, 20);
-    let words = rows_for(buffer.area).words;
+    let words = layout_of(&app, &buffer).words;
 
     // Read the row at full width: `lines` trims the trailing padding, and the
     // right margin is exactly the padding being trimmed.
@@ -130,8 +154,8 @@ fn the_words_are_centred() {
 /// The pane is the area inside the border, above the status line, so the border
 /// and the counters — drawn in the same colours — are excluded. Blank cells are
 /// dropped because the pane is pre-filled with the base style.
-fn text_in_color(buffer: &Buffer, color: ratatui::style::Color) -> String {
-    area_text_in_color(buffer, rows_for(buffer.area).words, color)
+fn text_in_color(buffer: &Buffer, app: &App, color: ratatui::style::Color) -> String {
+    area_text_in_color(buffer, layout_of(app, buffer).words, color)
 }
 
 /// The same, restricted to one rectangle.
@@ -150,8 +174,8 @@ fn area_text_in_color(buffer: &Buffer, area: Rect, color: ratatui::style::Color)
 ///
 /// The caret is the only thing drawn with the foreground colour as its
 /// background, so it can be found by colour rather than by column arithmetic.
-fn caret_cells(buffer: &Buffer, theme: &Theme) -> Vec<(u16, u16, String)> {
-    let area = rows_for(buffer.area).words;
+fn caret_cells(buffer: &Buffer, app: &App, theme: &Theme) -> Vec<(u16, u16, String)> {
+    let area = layout_of(&app, buffer).words;
     (area.y..area.y + area.height)
         .flat_map(|y| (area.x..area.x + area.width).map(move |x| (x, y)))
         .filter(|(x, y)| buffer[(*x, *y)].bg == theme.foreground)
@@ -171,18 +195,18 @@ fn typed_letters_are_painted_in_the_correct_colour() {
     let buffer = render(&app, 40, 20);
 
     assert_eq!(
-        text_in_color(&buffer, theme.correct),
+        text_in_color(&buffer, &app, theme.correct),
         "wo",
         "the two matching letters"
     );
     assert_eq!(
-        text_in_color(&buffer, theme.incorrect),
+        text_in_color(&buffer, &app, theme.incorrect),
         "",
         "nothing was mistyped, so nothing should be red"
     );
 
     // The caret has moved onto the third letter.
-    let caret = caret_cells(&buffer, &theme);
+    let caret = caret_cells(&buffer, &app, &theme);
     assert_eq!(caret.len(), 1, "one caret: {caret:?}");
     assert_eq!(caret[0].2, "r", "the caret sits on the next letter");
 }
@@ -201,13 +225,13 @@ fn a_mistyped_letter_turns_red_but_the_caret_still_moves_on() {
     // The mistake is shown against the character that should have been typed, so
     // the third cell is red and still reads 'r'.
     assert_eq!(
-        text_in_color(&buffer, theme.incorrect),
+        text_in_color(&buffer, &app, theme.incorrect),
         "r",
         "only the third letter is wrong"
     );
 
     // The caret ran past the word, so it is parked on a blank rather than lost.
-    let caret: Vec<String> = caret_cells(&buffer, &theme)
+    let caret: Vec<String> = caret_cells(&buffer, &app, &theme)
         .into_iter()
         .map(|c| c.2)
         .collect();
@@ -227,7 +251,7 @@ fn a_committed_word_keeps_its_own_colour_and_does_not_bleed_into_the_next() {
     let buffer = render(&app, 40, 20);
 
     assert_eq!(
-        text_in_color(&buffer, theme.correct),
+        text_in_color(&buffer, &app, theme.correct),
         "good",
         "the finished word keeps its colour"
     );
@@ -235,7 +259,7 @@ fn a_committed_word_keeps_its_own_colour_and_does_not_bleed_into_the_next() {
     // The mistake in the word being typed is shown against the target character,
     // so the typist can see what they should have pressed.
     assert_eq!(
-        text_in_color(&buffer, theme.incorrect),
+        text_in_color(&buffer, &app, theme.incorrect),
         "b",
         "not the x that was typed"
     );
@@ -252,7 +276,7 @@ fn the_word_view_scrolls_so_the_caret_never_leaves_the_screen() {
         app.set_words(words.clone());
         app.set_cursor_word(cursor);
         let buffer = render(&app, 12, 20);
-        let area = word_area(&buffer);
+        let area = word_area(&buffer, &app);
         let active = &words[cursor];
         assert!(
             area.contains(active.as_str()),
@@ -267,7 +291,7 @@ fn scrolling_actually_hides_earlier_words() {
     let words = single_char_words();
     app.set_words(words.clone());
     app.set_cursor_word(words.len() - 1);
-    let area = word_area(&render(&app, 12, 20));
+    let area = word_area(&render(&app, 12, 20), &app);
     assert!(
         !area.contains(&words[0]),
         "the first word should have scrolled off:\n{area}"
@@ -330,7 +354,7 @@ fn a_one_cell_terminal_still_renders() {
 fn the_chart_appears_once_the_test_has_run() {
     let mut app = app();
     app.set_words(vec!["word".to_owned()]);
-    let rows = rows_for(render(&app, 60, 20).area).chart;
+    let rows = layout_of(&app, &render(&app, 60, 20)).chart;
     assert!(
         area_text(&render(&app, 60, 20), rows).trim().is_empty(),
         "an unstarted test has nothing to plot"

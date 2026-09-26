@@ -13,6 +13,8 @@
 
 pub mod fetch;
 pub mod language;
+pub mod quotes;
+pub mod variants;
 
 use unicode_width::UnicodeWidthChar;
 
