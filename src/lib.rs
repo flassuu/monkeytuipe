@@ -13,4 +13,5 @@ pub mod api;
 pub mod app;
 pub mod config;
 pub mod screens;
+pub mod stats;
 pub mod terminal;

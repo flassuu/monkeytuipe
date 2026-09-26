@@ -62,6 +62,25 @@ impl Default for TestConfig {
 }
 
 impl Config {
+    /// The environment variable that overrides [`Config::ape_key`].
+    pub const APE_KEY_ENV: &'static str = "MONKEYTUIPE_APEKEY";
+
+    /// The ApeKey to actually use.
+    ///
+    /// [`Config::APE_KEY_ENV`] wins over the config file, so a key can live in
+    /// the shell or a password manager and never touch disk. The file remains
+    /// a fallback for people who would rather not set an env var every time.
+    pub fn resolved_ape_key(&self) -> Option<String> {
+        std::env::var(Self::APE_KEY_ENV)
+            .ok()
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty())
+            .or_else(|| {
+                let key = self.ape_key.trim();
+                (!key.is_empty()).then(|| key.to_owned())
+            })
+    }
+
     /// The path the config is read from: `$MONKEYTUIPE_CONFIG`, else
     /// `$XDG_CONFIG_HOME/monkeytuipe/config.toml`, else `~/.config/monkeytuipe/config.toml`.
     pub fn default_path() -> PathBuf {
@@ -131,5 +150,53 @@ mod tests {
         config.save(&path).expect("save");
         assert_eq!(Config::load(&path).expect("load"), config);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// All the ApeKey resolution rules in one test.
+    ///
+    /// The environment is process-global and `cargo test` runs tests in
+    /// parallel threads, so these cases must not be split across separate
+    /// `#[test]` functions or they would clobber each other.
+    #[test]
+    fn ape_key_resolution() {
+        const ENV: &str = Config::APE_KEY_ENV;
+
+        // SAFETY: the only test in this process that touches the variable, and
+        // it restores whatever was there on the way out.
+        let previous = std::env::var_os(ENV);
+        let restore = || match previous.clone() {
+            Some(value) => unsafe { std::env::set_var(ENV, value) },
+            None => unsafe { std::env::remove_var(ENV) },
+        };
+
+        let mut config = Config::default();
+
+        unsafe { std::env::remove_var(ENV) };
+        assert_eq!(config.resolved_ape_key(), None, "set nowhere");
+        config.ape_key = "   ".to_owned();
+        assert_eq!(config.resolved_ape_key(), None, "whitespace is not a key");
+
+        config.ape_key = "from-file".to_owned();
+        assert_eq!(
+            config.resolved_ape_key().as_deref(),
+            Some("from-file"),
+            "the file is the fallback"
+        );
+
+        unsafe { std::env::set_var(ENV, "  from-env  ") };
+        assert_eq!(
+            config.resolved_ape_key().as_deref(),
+            Some("from-env"),
+            "the env var wins, and is trimmed"
+        );
+
+        unsafe { std::env::set_var(ENV, "") };
+        assert_eq!(
+            config.resolved_ape_key().as_deref(),
+            Some("from-file"),
+            "an empty env var must not shadow the file"
+        );
+
+        restore();
     }
 }

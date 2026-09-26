@@ -36,10 +36,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let config = Config::load(&config_path)?;
+    let ape_key = config.resolved_ape_key();
 
-    // Build the client up front so a bad base URL surfaces at boot rather than
-    // after a finished test.
-    let client = api::ApiClient::new(&config.api_url, &config.ape_key);
+    // The env var wins over the file, so resolve it before the client is built.
+    let client = api::ApiClient::new(&config.api_url, ape_key.unwrap_or_default());
     let authenticated = client.is_authenticated();
 
     // `arm` before `init`: if entering the alternate screen fails, the panic
@@ -47,14 +47,19 @@ async fn main() -> anyhow::Result<()> {
     let mut guard = terminal::TerminalGuard::arm();
     let mut tui = terminal::init().context("entering the terminal")?;
 
-    let result = App::new(config, config_path).run(&mut tui);
+    let result = App::new(config, config_path.clone()).run(&mut tui);
 
     // Restore before propagating, so a failed test run still leaves a usable shell.
     guard.restore().context("restoring the terminal")?;
     result?;
 
     if !authenticated {
-        eprintln!("note: no ape_key is set, results will not be submitted");
+        eprintln!("note: no ape key set, results will not be submitted");
+        eprintln!(
+            "      set {} or add `ape_key` to {}",
+            Config::APE_KEY_ENV,
+            config_path.display()
+        );
     }
     Ok(())
 }
