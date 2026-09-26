@@ -12,6 +12,7 @@ pub mod action;
 pub mod api;
 pub mod app;
 pub mod config;
+pub mod engine;
 pub mod screens;
 pub mod stats;
 pub mod terminal;
