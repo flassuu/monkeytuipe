@@ -22,6 +22,12 @@ pub enum Effect {
     Switch(ScreenKind),
     /// Throw away the current test and start a fresh one.
     RestartTest,
+    /// Feed one character to the engine.
+    Type(char),
+    /// Remove the last character typed.
+    Backspace,
+    /// Jump over the active word.
+    SkipWord,
     /// Left/right on a settings row.
     Adjust(Row),
     /// Space on a settings row.

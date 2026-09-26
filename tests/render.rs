@@ -8,6 +8,7 @@ use ratatui::buffer::Buffer;
 use ratatui::Terminal;
 
 use monkeytuipe::app::App;
+use monkeytuipe::config::theme::Theme;
 use monkeytuipe::config::Config;
 use monkeytuipe::screens::ScreenKind;
 
@@ -59,8 +60,119 @@ fn the_typing_screen_draws_its_frame_and_status() {
     assert!(
         screen
             .iter()
-            .any(|l| l.contains("wpm") && l.contains("q quit")),
+            .any(|l| l.contains("wpm") && l.contains("acc") && l.contains("ctrl+c quit")),
         "no status line in {screen:?}"
+    );
+}
+
+/// The text painted in `color` inside the words pane, left to right then top to
+/// bottom.
+///
+/// The pane is the area inside the border, above the status line, so the border
+/// and the counters — drawn in the same colours — are excluded. Blank cells are
+/// dropped because the pane is pre-filled with the base style.
+fn text_in_color(buffer: &Buffer, color: ratatui::style::Color) -> String {
+    (1..buffer.area.height.saturating_sub(2))
+        .flat_map(|y| (1..buffer.area.width.saturating_sub(1)).map(move |x| (x, y)))
+        .filter(|(x, y)| {
+            let cell = &buffer[(*x, *y)];
+            cell.fg == color && cell.symbol() != " "
+        })
+        .map(|(x, y)| buffer[(x, y)].symbol().to_owned())
+        .collect()
+}
+
+/// The caret cells in the words pane, as (x, y, symbol).
+///
+/// The caret is the only thing drawn with the foreground colour as its
+/// background, so it can be found by colour rather than by column arithmetic.
+fn caret_cells(buffer: &Buffer, theme: &Theme) -> Vec<(u16, u16, String)> {
+    (1..buffer.area.height.saturating_sub(2))
+        .flat_map(|y| (1..buffer.area.width.saturating_sub(1)).map(move |x| (x, y)))
+        .filter(|(x, y)| buffer[(*x, *y)].bg == theme.foreground)
+        .map(|(x, y)| (x, y, buffer[(x, y)].symbol().to_owned()))
+        .collect()
+}
+
+#[test]
+fn typed_letters_are_painted_in_the_correct_colour() {
+    let mut app = app();
+    app.set_words(vec!["word".to_owned()]);
+    let theme = app.theme();
+
+    for c in "wo".chars() {
+        app.type_char(c);
+    }
+    let buffer = render(&app, 40, 10);
+
+    assert_eq!(
+        text_in_color(&buffer, theme.correct),
+        "wo",
+        "the two matching letters"
+    );
+    assert_eq!(
+        text_in_color(&buffer, theme.incorrect),
+        "",
+        "nothing was mistyped, so nothing should be red"
+    );
+
+    // The caret has moved onto the third letter.
+    let caret = caret_cells(&buffer, &theme);
+    assert_eq!(caret.len(), 1, "one caret: {caret:?}");
+    assert_eq!(caret[0].2, "r", "the caret sits on the next letter");
+}
+
+#[test]
+fn a_mistyped_letter_turns_red_but_the_caret_still_moves_on() {
+    let mut app = app();
+    app.set_words(vec!["word".to_owned()]);
+    let theme = app.theme();
+
+    for c in "woid".chars() {
+        app.type_char(c);
+    }
+    let buffer = render(&app, 40, 10);
+
+    // The mistake is shown against the character that should have been typed, so
+    // the third cell is red and still reads 'r'.
+    assert_eq!(
+        text_in_color(&buffer, theme.incorrect),
+        "r",
+        "only the third letter is wrong"
+    );
+
+    // The caret ran past the word, so it is parked on a blank rather than lost.
+    let caret: Vec<String> = caret_cells(&buffer, &theme)
+        .into_iter()
+        .map(|c| c.2)
+        .collect();
+    assert_eq!(caret, vec![" ".to_owned()]);
+}
+
+#[test]
+fn a_committed_word_keeps_its_own_colour_and_does_not_bleed_into_the_next() {
+    let mut app = app();
+    app.set_words(vec!["good".to_owned(), "bad".to_owned()]);
+    let theme = app.theme();
+
+    for c in "good ".chars() {
+        app.type_char(c);
+    }
+    app.type_char('x');
+    let buffer = render(&app, 40, 10);
+
+    assert_eq!(
+        text_in_color(&buffer, theme.correct),
+        "good",
+        "the finished word keeps its colour"
+    );
+
+    // The mistake in the word being typed is shown against the target character,
+    // so the typist can see what they should have pressed.
+    assert_eq!(
+        text_in_color(&buffer, theme.incorrect),
+        "b",
+        "not the x that was typed"
     );
 }
 

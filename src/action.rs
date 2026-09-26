@@ -22,4 +22,8 @@ pub enum Action {
     Restart,
     /// A literal character was typed (one `char`, not a full `String`).
     Char(char),
+    /// Remove the last character, walking back into the previous word.
+    Backspace,
+    /// Jump over the active word without scoring it.
+    Skip,
 }

@@ -1,7 +1,7 @@
 //! Typing screen: the main test view.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
@@ -9,6 +9,7 @@ use ratatui::Frame;
 use crate::action::Action;
 use crate::app::App;
 use crate::config::theme::Theme;
+use crate::engine::{Word, WordState};
 use crate::screens::{Effect, Screen, ScreenKind};
 
 #[derive(Debug, Default)]
@@ -38,17 +39,27 @@ impl Screen for Typing {
             Action::StartTest | Action::Restart => vec![Effect::RestartTest],
             Action::Settings => vec![Effect::Switch(ScreenKind::Settings)],
             Action::Quit => vec![Effect::Quit],
-            // Everything else belongs to the engine, which is not wired up yet.
-            _ => Vec::new(),
+            Action::Char(c) => vec![Effect::Type(c)],
+            Action::Backspace => vec![Effect::Backspace],
+            Action::Skip => vec![Effect::SkipWord],
+            // Navigation belongs to the settings screen; the words pane scrolls
+            // itself, so these have nothing to do here.
+            Action::Up
+            | Action::Down
+            | Action::Left
+            | Action::Right
+            | Action::Select
+            | Action::Back => Vec::new(),
         }
     }
 }
 
-/// The word list, with the character under the caret drawn as a block.
+/// The word list, coloured per character, with the caret on the next character
+/// to type.
 ///
 /// When the words no longer fit, the view scrolls so the active word stays visible.
 fn render_words(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
-    let words = app.words();
+    let words = app.test().words();
     if words.is_empty() {
         return;
     }
@@ -65,14 +76,12 @@ fn render_words(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
             spans.push(Span::raw(" "));
         }
         if index == active {
-            spans.extend(active_word(word.as_str(), theme));
+            spans.extend(active_word(word, theme));
         } else {
-            let color = if index < active {
-                theme.muted
-            } else {
-                theme.foreground
-            };
-            spans.push(Span::styled(word.as_str(), Style::default().fg(color)));
+            spans.push(Span::styled(
+                word.text(),
+                settled_style(word.state(), theme),
+            ));
         }
     }
 
@@ -82,42 +91,77 @@ fn render_words(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
     );
 }
 
-/// The active word, with its first character as the block caret.
+/// The style of a word that is no longer being typed.
+fn settled_style(state: WordState, theme: Theme) -> Style {
+    match state {
+        WordState::Correct => Style::default().fg(theme.correct),
+        WordState::Incorrect => Style::default().fg(theme.incorrect),
+        // Skipped words recede rather than being flagged as mistakes.
+        WordState::Skipped | WordState::Untouched | WordState::Typing => {
+            Style::default().fg(theme.muted)
+        }
+    }
+}
+
+/// The active word: every character coloured by whether it matched, with the
+/// caret drawn inline on the next one.
 ///
-/// The caret is drawn inline rather than on a row of its own, which is what
-/// monkeytype does and what keeps the caret attached to its character once the
-/// line wraps.
-fn active_word(word: &str, theme: Theme) -> Vec<Span<'static>> {
-    let mut chars = word.chars();
-    let mut spans = Vec::new();
+/// The caret is inline rather than on a row of its own, which is what monkeytype
+/// does and what keeps it attached to its character once the line wraps.
+fn active_word(word: &Word, theme: Theme) -> Vec<Span<'static>> {
+    let typed: Vec<char> = word.input().chars().collect();
+    let target: Vec<char> = word.text().chars().collect();
+    let caret = typed.len();
+    let width = target.len().max(typed.len());
+    let mut spans = Vec::with_capacity(width + 1);
 
-    let head = chars.next();
-    let tail: String = chars.collect();
+    for i in 0..width {
+        let style = if i == caret {
+            // The caret is an inverse block, so it needs the background swap.
+            theme.caret()
+        } else if let Some(&actual) = typed.get(i) {
+            match target.get(i) {
+                Some(&expected) if actual == expected => Style::default().fg(theme.correct),
+                _ => Style::default().fg(theme.incorrect),
+            }
+        } else {
+            Style::default().fg(theme.muted)
+        };
+        // Show the target character where there is one, so the caret always sits
+        // on what the typist is being asked for, and the typed character where
+        // they have overrun the word.
+        let shown = target
+            .get(i)
+            .or_else(|| typed.get(i))
+            .copied()
+            .unwrap_or(' ');
+        spans.push(Span::styled(shown.to_string(), style));
+    }
 
-    if let Some(head) = head {
-        spans.push(Span::styled(head.to_string(), theme.caret()));
+    if caret >= width {
+        // The caret has run past the last character, which is where it sits once
+        // a whole word is typed. Park it on a blank rather than let it vanish.
+        spans.push(Span::styled(" ", theme.caret()));
     }
-    if !tail.is_empty() {
-        spans.push(Span::styled(
-            tail,
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
+
     spans
 }
 
 fn render_stats(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
+    let started = app.test().is_started();
     let line = Line::from(vec![
         Span::styled("wpm ", theme.chrome()),
-        Span::styled(app.wpm().to_string(), theme.value()),
+        Span::styled(format!("{:.0}", app.wpm()), theme.value()),
         Span::styled("  acc ", theme.chrome()),
         Span::styled(format!("{:.0}%", app.accuracy()), theme.value()),
         Span::styled("  time ", theme.chrome()),
-        Span::styled(format!("{:>3}s", app.remaining_secs()), theme.value()),
+        Span::styled(app.countdown(), theme.value()),
         Span::styled(
-            "  t start · r restart · , settings · q quit",
+            if started {
+                "  ·  tab skip · ctrl+r restart · f2 settings"
+            } else {
+                "  ·  type to start · ctrl+c quit"
+            },
             theme.chrome(),
         ),
     ]);

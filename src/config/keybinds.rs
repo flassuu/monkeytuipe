@@ -5,6 +5,12 @@ use serde::{Deserialize, Serialize};
 use crate::action::Action;
 
 /// Logical action names used in `config.toml`.
+///
+/// The defaults are deliberately *not* bare letters. A single-letter binding
+/// makes that letter untypeable, and on the typing screen every letter is text:
+/// `t` starts "the", `,` is a punctuation test, `q` is a word. Commands that
+/// must work mid-test therefore carry a modifier or a function key, which is
+/// also how the website avoids the same problem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Binding {
@@ -38,16 +44,17 @@ pub struct Keybinds {
 impl Default for Keybinds {
     fn default() -> Self {
         Self {
-            quit: vec!["q".into(), "ctrl+c".into()],
+            // `ctrl+c` is the only quit binding, because it can never be text.
+            quit: vec!["ctrl+c".into()],
             up: vec!["up".into(), "k".into()],
             down: vec!["down".into(), "j".into()],
             left: vec!["left".into(), "h".into()],
             right: vec!["right".into(), "l".into()],
-            select: vec!["space".into()],
-            back: vec!["esc".into(), "enter".into()],
-            settings: vec![",".into()],
-            start_test: vec!["t".into()],
-            restart: vec!["r".into()],
+            select: vec!["enter".into()],
+            back: vec!["esc".into()],
+            settings: vec!["f2".into()],
+            start_test: vec!["ctrl+t".into()],
+            restart: vec!["ctrl+r".into()],
         }
     }
 }
@@ -75,10 +82,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_binds_quit_to_q_and_ctrl_c() {
+    fn default_binds_quit_to_ctrl_c() {
         let keybinds = Keybinds::default();
-        assert!(keybinds.quit.contains(&"q".to_string()));
         assert!(keybinds.quit.contains(&"ctrl+c".to_string()));
+    }
+
+    #[test]
+    fn no_mid_test_binding_is_a_bare_letter() {
+        // A bare letter binding makes that letter untypeable, and every letter
+        // has to be typeable on the typing screen. Only the bindings that have to
+        // work *during* a test are checked: the menu navigation keys are never
+        // read there, and `hjkl` is worth having on the settings screen.
+        let keybinds = Keybinds::default();
+        for keys in [
+            &keybinds.quit,
+            &keybinds.settings,
+            &keybinds.start_test,
+            &keybinds.restart,
+        ] {
+            for key in keys {
+                assert!(
+                    !key.chars().all(|c| !c.is_ascii_alphanumeric()) || key.chars().count() > 1,
+                    "`{key}` is a bare key and would be untypeable"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn menu_navigation_keeps_its_vim_keys() {
+        let keybinds = Keybinds::default();
+        assert!(keybinds.left.contains(&"h".to_string()));
+        assert!(keybinds.right.contains(&"l".to_string()));
+        assert!(keybinds.up.contains(&"k".to_string()));
+        assert!(keybinds.down.contains(&"j".to_string()));
     }
 
     #[test]

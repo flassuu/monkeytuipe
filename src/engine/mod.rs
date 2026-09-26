@@ -94,6 +94,7 @@ pub struct Test {
     mode2: u32,
     inputs: Inputs,
     chars: CharCounts,
+    started: bool,
     finished: bool,
 }
 
@@ -125,6 +126,7 @@ impl Test {
             mode2,
             inputs: Inputs::default(),
             chars: CharCounts::default(),
+            started: false,
             finished: false,
         }
     }
@@ -171,6 +173,19 @@ impl Test {
         self.finished
     }
 
+    /// Whether the typist has touched anything yet.
+    ///
+    /// The clock does not run until this is true, so time spent reading the
+    /// words is not charged to the score.
+    pub fn is_started(&self) -> bool {
+        self.started
+    }
+
+    /// Whether the test is under way, i.e. started but not yet over.
+    pub fn is_running(&self) -> bool {
+        self.started && !self.finished
+    }
+
     /// How far through the test the typist is, from 0 to 1.
     pub fn progress(&self) -> f64 {
         let total = self.words.len();
@@ -190,7 +205,7 @@ impl Test {
         if self.finished {
             return Keystroke::Ignored;
         }
-
+        self.started = true;
         let correct = self.active_word().accepts(c);
         let is_commit = c == ' ' || c == '\n';
 
@@ -216,6 +231,7 @@ impl Test {
         if self.finished {
             return Keystroke::Ignored;
         }
+        self.started = true;
         self.active_word_mut().skip();
         self.advance();
         Keystroke::Skipped
