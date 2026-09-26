@@ -77,7 +77,6 @@ fn single_char_words() -> Vec<String> {
 
 #[test]
 fn the_typing_screen_draws_its_header_and_counters() {
-    let buffer = render(&app(), 100, 20);
     let app = app();
     let buffer = render(&app, 100, 20);
     let rows = layout_of(&app, &buffer);
@@ -175,7 +174,7 @@ fn area_text_in_color(buffer: &Buffer, area: Rect, color: ratatui::style::Color)
 /// The caret is the only thing drawn with the foreground colour as its
 /// background, so it can be found by colour rather than by column arithmetic.
 fn caret_cells(buffer: &Buffer, app: &App, theme: &Theme) -> Vec<(u16, u16, String)> {
-    let area = layout_of(&app, buffer).words;
+    let area = layout_of(app, buffer).words;
     (area.y..area.y + area.height)
         .flat_map(|y| (area.x..area.x + area.width).map(move |x| (x, y)))
         .filter(|(x, y)| buffer[(*x, *y)].bg == theme.foreground)

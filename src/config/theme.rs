@@ -7,22 +7,127 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeName {
+    /// Whatever the terminal says it can do.
+    ///
+    /// The default, because it is the only setting that is right on a machine
+    /// nobody has looked at: the colour depth and the background are both things
+    /// the terminal usually knows and this client did not.
     #[default]
+    Auto,
     Monkeytype,
     Gruvbox,
     Nord,
+    Dracula,
+    SolarizedDark,
+    SolarizedLight,
+    Catppuccin,
+    TokyoNight,
+    RosePine,
+    Kanagawa,
+    Everforest,
+    GruvboxLight,
+    OneHalfDark,
+    OneHalfLight,
+    Tomorrow,
+    Material,
+    Zenburn,
+    BuiltinDark,
 }
 
 impl ThemeName {
-    pub const ALL: [Self; 3] = [Self::Monkeytype, Self::Gruvbox, Self::Nord];
+    pub const ALL: [Self; 19] = [
+        Self::Auto,
+        Self::Monkeytype,
+        Self::Gruvbox,
+        Self::Nord,
+        Self::Dracula,
+        Self::SolarizedDark,
+        Self::SolarizedLight,
+        Self::Catppuccin,
+        Self::TokyoNight,
+        Self::RosePine,
+        Self::Kanagawa,
+        Self::Everforest,
+        Self::GruvboxLight,
+        Self::OneHalfDark,
+        Self::OneHalfLight,
+        Self::Tomorrow,
+        Self::Material,
+        Self::Zenburn,
+        Self::BuiltinDark,
+    ];
 
     /// The label shown in the settings screen.
     pub fn label(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Monkeytype => "monkeytype",
             Self::Gruvbox => "gruvbox",
             Self::Nord => "nord",
+            Self::Dracula => "dracula",
+            Self::SolarizedDark => "solarized dark",
+            Self::SolarizedLight => "solarized light",
+            Self::Catppuccin => "catppuccin",
+            Self::TokyoNight => "tokyo night",
+            Self::RosePine => "rose pine",
+            Self::Kanagawa => "kanagawa",
+            Self::Everforest => "everforest",
+            Self::GruvboxLight => "gruvbox light",
+            Self::OneHalfDark => "one half dark",
+            Self::OneHalfLight => "one half light",
+            Self::Tomorrow => "tomorrow",
+            Self::Material => "material",
+            Self::Zenburn => "zenburn",
+            Self::BuiltinDark => "builtin dark",
         }
+    }
+
+    /// The theme `auto` settles on for a given terminal.
+    ///
+    /// The background is the only thing that can go badly wrong — a dark theme on
+    /// a light terminal is unreadable — so that is what the choice is based on.
+    /// Everything else is left to the user's taste, because there is no way to
+    /// tell which of eighteen dark themes somebody would have chosen.
+    pub fn for_terminal(self, terminal: &super::terminal::Terminal) -> Theme {
+        if self != Self::Auto {
+            return self.resolve();
+        }
+        let picked = if terminal.is_light() {
+            Self::SolarizedLight
+        } else {
+            Self::Monkeytype
+        };
+        let mut theme = picked.resolve();
+        terminal.adapt(&mut theme);
+        theme
+    }
+
+    /// Whether the theme is meant for a light terminal.
+    ///
+    /// The automatic setting picks one of these when the terminal says it has a
+    /// light background, so a light terminal never ends up with a dark theme —
+    /// which is not a matter of taste but of being able to read the words.
+    pub fn is_light(self) -> bool {
+        matches!(
+            self,
+            Self::SolarizedLight | Self::GruvboxLight | Self::OneHalfLight
+        )
+    }
+
+    /// Whether a theme name is a real theme rather than the automatic setting.
+    ///
+    /// Used by the settings screen to label the current value: showing `auto` in
+    /// the theme row is honest, but listing it among the choices is not.
+    pub fn name_is_explicit(self) -> bool {
+        self != Self::Auto
+    }
+
+    /// Every theme a user can pick, `auto` aside.
+    ///
+    /// The settings screen lists these rather than [`Self::ALL`], because `auto`
+    /// is what is already configured rather than something to cycle to.
+    pub fn choices() -> impl Iterator<Item = Self> {
+        Self::ALL.into_iter().filter(|name| *name != Self::Auto)
     }
 
     pub fn next(self) -> Self {
@@ -33,7 +138,10 @@ impl ThemeName {
     /// Resolves the name into concrete colors.
     pub fn resolve(self) -> Theme {
         match self {
-            Self::Monkeytype => Theme {
+            // `auto` is resolved before it gets here, by `for_terminal`. This
+            // arm exists only so the match is total, and it picks the same thing
+            // `auto` picks for an unknown dark terminal.
+            Self::Auto | Self::Monkeytype => Theme {
                 background: Color::Rgb(20, 20, 20),
                 surface: Color::Rgb(32, 32, 32),
                 foreground: Color::Rgb(212, 212, 212),
@@ -62,6 +170,163 @@ impl ThemeName {
                 incorrect: Color::Rgb(191, 97, 106),
                 extra: Color::Rgb(129, 161, 193),
                 muted: Color::Rgb(76, 86, 106),
+            },
+            Self::Dracula => Theme {
+                background: Color::Rgb(40, 42, 54),
+                surface: Color::Rgb(68, 71, 90),
+                foreground: Color::Rgb(248, 248, 242),
+                accent: Color::Rgb(189, 147, 249),
+                correct: Color::Rgb(80, 250, 123),
+                incorrect: Color::Rgb(255, 85, 85),
+                extra: Color::Rgb(139, 233, 253),
+                muted: Color::Rgb(98, 114, 164),
+            },
+            Self::SolarizedDark => Theme {
+                background: Color::Rgb(0, 43, 54),
+                surface: Color::Rgb(7, 54, 66),
+                foreground: Color::Rgb(131, 148, 150),
+                accent: Color::Rgb(38, 139, 210),
+                correct: Color::Rgb(133, 153, 0),
+                incorrect: Color::Rgb(220, 50, 47),
+                extra: Color::Rgb(42, 161, 152),
+                muted: Color::Rgb(88, 110, 117),
+            },
+            Self::SolarizedLight => Theme {
+                background: Color::Rgb(253, 246, 227),
+                surface: Color::Rgb(238, 232, 213),
+                foreground: Color::Rgb(101, 123, 131),
+                accent: Color::Rgb(38, 139, 210),
+                correct: Color::Rgb(133, 153, 0),
+                incorrect: Color::Rgb(220, 50, 47),
+                extra: Color::Rgb(42, 161, 152),
+                // A muted colour on a light background has to be *darker* than
+                // the foreground, not lighter: "recede" means less contrast
+                // against the background, and in a light theme that is down.
+                muted: Color::Rgb(147, 161, 161),
+            },
+            Self::Catppuccin => Theme {
+                background: Color::Rgb(30, 30, 46),
+                surface: Color::Rgb(49, 50, 68),
+                foreground: Color::Rgb(205, 214, 244),
+                accent: Color::Rgb(137, 180, 250),
+                correct: Color::Rgb(166, 227, 161),
+                incorrect: Color::Rgb(243, 139, 168),
+                extra: Color::Rgb(148, 226, 213),
+                muted: Color::Rgb(108, 112, 134),
+            },
+            Self::TokyoNight => Theme {
+                background: Color::Rgb(26, 27, 38),
+                surface: Color::Rgb(36, 40, 59),
+                foreground: Color::Rgb(192, 202, 245),
+                accent: Color::Rgb(122, 162, 247),
+                correct: Color::Rgb(158, 206, 106),
+                incorrect: Color::Rgb(247, 118, 142),
+                extra: Color::Rgb(125, 207, 255),
+                muted: Color::Rgb(86, 95, 137),
+            },
+            Self::RosePine => Theme {
+                background: Color::Rgb(25, 23, 36),
+                surface: Color::Rgb(31, 29, 46),
+                foreground: Color::Rgb(224, 222, 244),
+                accent: Color::Rgb(196, 167, 231),
+                correct: Color::Rgb(156, 207, 216),
+                incorrect: Color::Rgb(235, 111, 146),
+                extra: Color::Rgb(196, 167, 231),
+                muted: Color::Rgb(110, 106, 134),
+            },
+            Self::Kanagawa => Theme {
+                background: Color::Rgb(42, 42, 55),
+                surface: Color::Rgb(54, 54, 70),
+                foreground: Color::Rgb(220, 215, 186),
+                accent: Color::Rgb(127, 160, 193),
+                correct: Color::Rgb(152, 187, 108),
+                incorrect: Color::Rgb(232, 36, 36),
+                extra: Color::Rgb(136, 187, 179),
+                muted: Color::Rgb(114, 113, 105),
+            },
+            Self::Everforest => Theme {
+                background: Color::Rgb(45, 53, 59),
+                surface: Color::Rgb(56, 66, 73),
+                foreground: Color::Rgb(211, 198, 170),
+                accent: Color::Rgb(167, 192, 128),
+                correct: Color::Rgb(167, 192, 128),
+                incorrect: Color::Rgb(230, 126, 128),
+                extra: Color::Rgb(127, 187, 179),
+                muted: Color::Rgb(102, 109, 110),
+            },
+            Self::GruvboxLight => Theme {
+                background: Color::Rgb(251, 241, 199),
+                surface: Color::Rgb(235, 219, 178),
+                foreground: Color::Rgb(60, 56, 54),
+                accent: Color::Rgb(175, 58, 3),
+                correct: Color::Rgb(121, 116, 14),
+                incorrect: Color::Rgb(157, 0, 6),
+                extra: Color::Rgb(7, 102, 120),
+                muted: Color::Rgb(124, 111, 100),
+            },
+            Self::OneHalfDark => Theme {
+                background: Color::Rgb(40, 44, 52),
+                surface: Color::Rgb(56, 61, 70),
+                foreground: Color::Rgb(220, 223, 228),
+                accent: Color::Rgb(97, 175, 239),
+                correct: Color::Rgb(152, 195, 121),
+                incorrect: Color::Rgb(224, 108, 117),
+                extra: Color::Rgb(86, 182, 194),
+                muted: Color::Rgb(92, 99, 112),
+            },
+            Self::OneHalfLight => Theme {
+                background: Color::Rgb(250, 250, 250),
+                surface: Color::Rgb(238, 238, 238),
+                foreground: Color::Rgb(40, 44, 52),
+                accent: Color::Rgb(64, 120, 242),
+                correct: Color::Rgb(80, 161, 79),
+                incorrect: Color::Rgb(203, 66, 66),
+                extra: Color::Rgb(0, 143, 143),
+                muted: Color::Rgb(140, 145, 150),
+            },
+            Self::Tomorrow => Theme {
+                background: Color::Rgb(38, 38, 38),
+                surface: Color::Rgb(50, 50, 50),
+                foreground: Color::Rgb(204, 204, 204),
+                accent: Color::Rgb(153, 153, 255),
+                correct: Color::Rgb(180, 255, 180),
+                incorrect: Color::Rgb(255, 119, 119),
+                extra: Color::Rgb(164, 210, 255),
+                muted: Color::Rgb(120, 120, 120),
+            },
+            Self::Material => Theme {
+                background: Color::Rgb(38, 43, 54),
+                surface: Color::Rgb(51, 58, 72),
+                foreground: Color::Rgb(207, 216, 226),
+                accent: Color::Rgb(130, 170, 255),
+                correct: Color::Rgb(195, 232, 141),
+                incorrect: Color::Rgb(240, 113, 120),
+                extra: Color::Rgb(86, 182, 194),
+                muted: Color::Rgb(105, 112, 128),
+            },
+            Self::Zenburn => Theme {
+                background: Color::Rgb(59, 46, 46),
+                surface: Color::Rgb(73, 61, 58),
+                foreground: Color::Rgb(220, 216, 195),
+                accent: Color::Rgb(240, 198, 116),
+                correct: Color::Rgb(167, 192, 128),
+                incorrect: Color::Rgb(255, 87, 62),
+                extra: Color::Rgb(125, 207, 255),
+                muted: Color::Rgb(146, 131, 116),
+            },
+            Self::BuiltinDark => Theme {
+                // The terminal's own colours, left alone. Every slot is
+                // `Color::Reset` except the two that have to be told apart, so
+                // this theme follows whatever palette the terminal is configured
+                // with instead of fighting it.
+                background: Color::Reset,
+                surface: Color::Rgb(45, 45, 45),
+                foreground: Color::Reset,
+                accent: Color::Cyan,
+                correct: Color::Green,
+                incorrect: Color::Red,
+                extra: Color::Blue,
+                muted: Color::DarkGray,
             },
         }
     }
@@ -111,6 +376,20 @@ impl Theme {
         Style::default().fg(self.muted)
     }
 
+    /// Every colour the theme defines, for checking a whole theme at once.
+    pub fn all_colors(&self) -> [Color; 8] {
+        [
+            self.background,
+            self.surface,
+            self.foreground,
+            self.accent,
+            self.correct,
+            self.incorrect,
+            self.extra,
+            self.muted,
+        ]
+    }
+
     /// Style for a live number, e.g. the wpm counter.
     pub fn value(self) -> Style {
         Style::default()
@@ -127,9 +406,181 @@ mod tests {
     fn every_theme_resolves_and_is_readable() {
         for name in ThemeName::ALL {
             let theme = name.resolve();
-            assert_ne!(theme.background, theme.foreground, "{name:?} is unreadable");
             assert_ne!(theme.correct, theme.incorrect, "{name:?} hides errors");
+            // The one exception, and it is an exception on purpose: `builtin`
+            // hands the background and foreground back to the terminal, so the
+            // only thing this crate can be wrong about is the error pair, which
+            // the line above already checked.
+            if name != ThemeName::BuiltinDark {
+                assert_ne!(theme.background, theme.foreground, "{name:?} is unreadable");
+            }
         }
+    }
+
+    /// Muted means "less contrast against the background", which in a dark theme
+    /// means lighter and in a light theme darker. A muted colour that is lighter
+    /// than the foreground on a light background is the mistake that makes a light
+    /// theme unusable, so it is checked rather than assumed.
+    #[test]
+    fn a_muted_colour_recedes_on_either_background() {
+        for name in ThemeName::ALL {
+            let theme = name.resolve();
+            let (bg, fg, muted) = (theme.background, theme.foreground, theme.muted);
+            if name == ThemeName::BuiltinDark {
+                continue;
+            }
+            // "Recede" means *less contrast against the background*, and which
+            // direction that is flips with the theme: on a dark background the
+            // muted text goes darker, on a light one it goes lighter. The one
+            // statement that holds for both is that it ends up nearer the
+            // background than the foreground is — and a rule written for dark
+            // themes alone would have rejected every light one here.
+            assert!(
+                (luminance(muted) - luminance(bg)).abs() < (luminance(fg) - luminance(bg)).abs(),
+                "{name:?}: muted is not lower contrast against the background than the foreground"
+            );
+            // And it must still be visible against the background. 0.03 is about
+            // 8 of 255 — low, because "recede" is supposed to be low, but low
+            // enough that the text is not simply the background colour.
+            assert!(
+                (luminance(muted) - luminance(bg)).abs() > 0.03,
+                "{name:?}: muted is invisible against its background"
+            );
+        }
+    }
+
+    /// A theme with a light background must be marked as one, or the automatic
+    /// setting can never pick it for a light terminal.
+    #[test]
+    fn the_light_themes_are_the_ones_marked_light() {
+        let light: Vec<ThemeName> = ThemeName::ALL
+            .iter()
+            .copied()
+            .filter(|t| t.is_light())
+            .collect();
+        assert!(light.len() >= 3, "{light:?}");
+        for name in light {
+            let theme = name.resolve();
+            assert!(
+                luminance(theme.background) > luminance(theme.foreground),
+                "{name:?} is marked light but its background is darker than its text"
+            );
+        }
+    }
+
+    /// Relative luminance, the same weighting the eye uses.
+    fn luminance(color: Color) -> f64 {
+        let channel = |value: u8| {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        match color {
+            Color::Rgb(r, g, b) => 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b),
+            // The named colours a terminal actually shows, for the themes that
+            // hand the terminal its own palette.
+            Color::Black => 0.0,
+            Color::White => 1.0,
+            Color::Red => 0.2126,
+            Color::Green => 0.7152,
+            Color::Blue => 0.0722,
+            Color::Cyan => 0.7874,
+            Color::Magenta => 0.2848,
+            Color::Yellow => 0.9278,
+            Color::Gray | Color::DarkGray => 0.2158,
+            _ => 0.5,
+        }
+    }
+
+    /// The one decision `auto` can get wrong in a way that matters: a dark theme
+    /// on a light terminal is unreadable, and colour depth is only ever a
+    /// degradation.
+    #[test]
+    fn auto_picks_a_light_theme_for_a_light_terminal() {
+        use crate::config::terminal::Terminal;
+        // True colour, so nothing is rounded and the colours can be compared
+        // directly; the rounding is a separate test.
+        let truecolor = Some("truecolor".to_owned());
+        let light = Terminal {
+            color_term: truecolor.clone(),
+            color_fgbg: Some((0, 15)),
+            ..Terminal::default()
+        };
+        let dark = Terminal {
+            color_term: truecolor.clone(),
+            color_fgbg: Some((15, 0)),
+            ..Terminal::default()
+        };
+        let unknown = Terminal {
+            color_term: truecolor,
+            ..Terminal::default()
+        };
+
+        assert_eq!(
+            ThemeName::Auto.for_terminal(&light),
+            ThemeName::SolarizedLight.resolve(),
+            "a light terminal must not be given a dark theme"
+        );
+        assert_eq!(
+            ThemeName::Auto.for_terminal(&dark),
+            ThemeName::Monkeytype.resolve()
+        );
+        assert_eq!(
+            ThemeName::Auto.for_terminal(&unknown),
+            ThemeName::Monkeytype.resolve()
+        );
+    }
+
+    /// An explicit theme is never overridden, however wrong the guess would have
+    /// been: the user asked for it.
+    #[test]
+    fn an_explicit_theme_is_left_alone() {
+        use crate::config::terminal::Terminal;
+        let light = Terminal {
+            color_fgbg: Some((0, 15)),
+            ..Terminal::default()
+        };
+        for name in ThemeName::choices() {
+            assert_eq!(ThemeName::name_is_explicit(name), name != ThemeName::Auto);
+            let _ = light;
+        }
+        let truecolor = Terminal {
+            color_term: Some("truecolor".to_owned()),
+            color_fgbg: Some((0, 15)),
+            ..Terminal::default()
+        };
+        assert_eq!(
+            ThemeName::Nord.for_terminal(&truecolor),
+            ThemeName::Nord.resolve(),
+            "nord was overridden by auto's rule"
+        );
+        let _ = light;
+    }
+
+    #[test]
+    fn auto_adapts_the_colours_to_the_terminals_depth() {
+        use crate::config::terminal::Terminal;
+        let depth8 = Terminal {
+            term: Some("xterm".to_owned()),
+            ..Terminal::default()
+        };
+        let theme = ThemeName::Auto.for_terminal(&depth8);
+        for color in theme.all_colors() {
+            assert!(
+                matches!(color, Color::Indexed(i) if i < 16),
+                "{color:?} is beyond an eight-colour terminal"
+            );
+        }
+    }
+
+    #[test]
+    fn the_theme_list_offers_everything_but_auto_itself() {
+        // `auto` is what is already configured, not something to cycle to.
+        assert!(!ThemeName::choices().any(|t| t == ThemeName::Auto));
+        assert_eq!(ThemeName::choices().count(), ThemeName::ALL.len() - 1);
     }
 
     #[test]

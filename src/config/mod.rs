@@ -2,6 +2,7 @@
 
 pub mod bar;
 pub mod keybinds;
+pub mod terminal;
 pub mod theme;
 
 use std::path::{Path, PathBuf};
@@ -10,6 +11,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 pub use bar::{Bar, Field, LengthUnit, QuoteLength};
+pub use terminal::Terminal;
 
 /// Defaults applied to any field the config file leaves out.
 impl Default for Config {

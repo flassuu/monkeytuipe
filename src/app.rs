@@ -68,6 +68,12 @@ pub struct App {
     /// does not care about.
     quote_inbox: Receiver<QuoteList>,
     quote_sender: Sender<QuoteList>,
+    /// What the terminal behind the app is capable of, decided once at startup.
+    ///
+    /// Read from the environment rather than queried: see
+    /// [`crate::config::terminal`] for why, and for what is given up by not
+    /// asking the terminal over OSC 11.
+    terminal: crate::config::Terminal,
     /// The settings bar: which field is selected.
     ///
     /// Separate from the settings screen, which is where the values that are not
@@ -118,6 +124,7 @@ impl App {
             language: language::embedded(FALLBACK_LANGUAGE).expect("english is embedded"),
             requested: FALLBACK_LANGUAGE.to_owned(),
             pending: None,
+            terminal: crate::config::Terminal::from_env(),
             bar: Bar::idle(),
             quotes: None,
             quote_pending: None,
@@ -606,7 +613,12 @@ impl App {
     // ---- accessors used by screens -------------------------------------
 
     pub fn theme(&self) -> Theme {
-        self.config.theme.resolve()
+        self.config.theme.for_terminal(&self.terminal)
+    }
+
+    /// What the terminal says about itself, for the status line.
+    pub fn terminal(&self) -> &crate::config::Terminal {
+        &self.terminal
     }
 
     /// The test in progress.
@@ -1373,6 +1385,8 @@ mod tests {
         assert_eq!(app.screen_kind(), ScreenKind::Typing);
     }
 
+    /// The default theme is `auto`, so "toggling the theme" moves away from it
+    /// rather than along the list from the top.
     #[test]
     fn toggling_a_setting_marks_the_config_dirty() {
         let mut app = app();
@@ -1381,7 +1395,30 @@ mod tests {
         // Row 0 is the theme; right cycles it.
         app.on_key(press(KeyCode::Right)).expect("no io");
         assert!(app.is_dirty());
-        assert_eq!(app.config.theme, crate::config::theme::ThemeName::Gruvbox);
+        assert_eq!(
+            app.config.theme,
+            crate::config::theme::ThemeName::Monkeytype,
+            "auto is the default, so the first step is the first real theme"
+        );
+    }
+
+    /// `auto` is the default, and it is the only setting that can be right on a
+    /// machine nobody has configured: the colour depth and the background are
+    /// both things the terminal usually knows and this client did not.
+    #[test]
+    fn the_default_theme_is_auto() {
+        assert_eq!(
+            Config::default().theme,
+            crate::config::theme::ThemeName::Auto
+        );
+        let app = app();
+        assert_eq!(
+            app.theme().background,
+            crate::config::theme::ThemeName::Monkeytype
+                .resolve()
+                .background,
+            "an unknown terminal gets a dark theme"
+        );
     }
 
     #[test]
