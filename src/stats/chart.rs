@@ -21,6 +21,7 @@
 //! That is why this module replays the log instead of reading a running total.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use super::chars::count_chars;
 use super::event_log::{Event, EventLog};
@@ -86,6 +87,49 @@ impl Chart {
     /// Whether any keystroke was wrong, for the single red tick under the chart.
     pub fn has_errors(&self) -> bool {
         self.err.iter().any(|count| *count > 0)
+    }
+
+    /// The seconds one terminal column stands for.
+    ///
+    /// One second per column while the test fits on screen. Past that a column
+    /// covers a run of seconds, because a test longer than the terminal is wide
+    /// has to be compressed rather than clipped — silently dropping the tail
+    /// would be worse than a coarser picture of it.
+    fn column_span(&self, column: u16, columns: u16) -> Range<usize> {
+        let len = self.len();
+        if len == 0 || columns == 0 {
+            return 0..0;
+        }
+        let per_column = len.div_ceil(columns as usize);
+        let start = column as usize * per_column;
+        start..(start + per_column).min(len)
+    }
+
+    /// The burst figure for a column: the fastest second it covers.
+    ///
+    /// The fastest, not the average. Smoothing a stall away is the one thing a
+    /// chart must not do.
+    pub fn burst_at(&self, column: u16, columns: u16) -> f64 {
+        self.column_span(column, columns)
+            .filter_map(|i| self.burst.get(i).copied())
+            .fold(0.0, f64::max)
+    }
+
+    /// The cumulative wpm for a column: the last value it covers.
+    ///
+    /// Cumulative means the last, where the average so far is.
+    pub fn wpm_at(&self, column: u16, columns: u16) -> f64 {
+        self.column_span(column, columns)
+            .filter_map(|i| self.wpm.get(i).copied())
+            .next_back()
+            .unwrap_or(0.0)
+    }
+
+    /// The wrong keystrokes in a column.
+    pub fn err_at(&self, column: u16, columns: u16) -> u32 {
+        self.column_span(column, columns)
+            .filter_map(|i| self.err.get(i).copied())
+            .sum()
     }
 }
 

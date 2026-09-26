@@ -7,9 +7,12 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::Terminal;
 
+use ratatui::layout::Rect;
+
 use monkeytuipe::app::App;
 use monkeytuipe::config::theme::Theme;
 use monkeytuipe::config::Config;
+use monkeytuipe::screens::typing::rows_for;
 use monkeytuipe::screens::ScreenKind;
 
 /// Renders the app at `width`x`height` and returns the buffer.
@@ -32,10 +35,21 @@ fn lines(buffer: &Buffer) -> Vec<String> {
         .collect()
 }
 
-/// The text of the word area only: inside the block border, above the status line.
+/// The text of the word area only.
+///
+/// Taken from the screen's own layout rather than from row arithmetic, so a
+/// layout change moves this with it instead of quietly testing the wrong band.
 fn word_area(buffer: &Buffer) -> String {
-    let last = buffer.area.height as usize - 1;
-    lines(buffer)[1..last - 1].join("\n")
+    area_text(buffer, rows_for(buffer.area).words)
+}
+
+/// The text of one rectangle of the screen.
+fn area_text(buffer: &Buffer, area: Rect) -> String {
+    let all = lines(buffer);
+    (area.y..area.y + area.height)
+        .map(|y| all.get(y as usize).cloned().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn app() -> App {
@@ -53,16 +67,57 @@ fn single_char_words() -> Vec<String> {
 }
 
 #[test]
-fn the_typing_screen_draws_its_frame_and_status() {
-    let buffer = render(&app(), 100, 10);
-    let screen = lines(&buffer);
-    assert!(screen[0].contains("monkeytuipe"), "no title in {screen:?}");
-    assert!(
-        screen
-            .iter()
-            .any(|l| l.contains("wpm") && l.contains("acc") && l.contains("ctrl+c quit")),
-        "no status line in {screen:?}"
-    );
+fn the_typing_screen_draws_its_header_and_counters() {
+    let buffer = render(&app(), 100, 20);
+    let rows = rows_for(buffer.area);
+    let header = area_text(&buffer, rows.header);
+    assert!(header.contains("monkeytuipe"), "no title in {header:?}");
+    assert!(header.contains("english"), "no word list in {header:?}");
+
+    let counters = area_text(&buffer, rows.counters);
+    for expected in ["wpm", "acc", "time", "ctrl+c quit"] {
+        assert!(
+            counters.contains(expected),
+            "{expected:?} missing from {counters:?}"
+        );
+    }
+}
+
+/// The counters go on one line, the way the site shows them.
+#[test]
+fn the_counters_share_a_single_row() {
+    let buffer = render(&app(), 100, 20);
+    let counters = rows_for(buffer.area).counters;
+    assert_eq!(counters.height, 1, "the counters get one row, not a block");
+
+    let row: String = (counters.x..counters.x + counters.width)
+        .map(|x| buffer[(x, counters.y)].symbol())
+        .collect();
+    for label in ["wpm", "acc", "time"] {
+        assert!(
+            row.contains(label),
+            "{label} is not on the counter row: {row:?}"
+        );
+    }
+}
+
+/// The words are centred, not left against the frame.
+#[test]
+fn the_words_are_centred() {
+    let mut app = app();
+    app.set_words(vec!["word".to_owned()]);
+    let buffer = render(&app, 40, 20);
+    let words = rows_for(buffer.area).words;
+
+    // Read the row at full width: `lines` trims the trailing padding, and the
+    // right margin is exactly the padding being trimmed.
+    let row: String = (words.x..words.x + words.width)
+        .map(|x| buffer[(x, words.y)].symbol())
+        .collect();
+    let left = row.len() - row.trim_start().len();
+    let right = row.len() - row.trim_end().len();
+    assert_eq!(left, right, "the word is not centred: {row:?}");
+    assert!(left > 0, "the word is hard against the frame: {row:?}");
 }
 
 /// The text painted in `color` inside the words pane, left to right then top to
@@ -72,8 +127,13 @@ fn the_typing_screen_draws_its_frame_and_status() {
 /// and the counters — drawn in the same colours — are excluded. Blank cells are
 /// dropped because the pane is pre-filled with the base style.
 fn text_in_color(buffer: &Buffer, color: ratatui::style::Color) -> String {
-    (1..buffer.area.height.saturating_sub(2))
-        .flat_map(|y| (1..buffer.area.width.saturating_sub(1)).map(move |x| (x, y)))
+    area_text_in_color(buffer, rows_for(buffer.area).words, color)
+}
+
+/// The same, restricted to one rectangle.
+fn area_text_in_color(buffer: &Buffer, area: Rect, color: ratatui::style::Color) -> String {
+    (area.y..area.y + area.height)
+        .flat_map(|y| (area.x..area.x + area.width).map(move |x| (x, y)))
         .filter(|(x, y)| {
             let cell = &buffer[(*x, *y)];
             cell.fg == color && cell.symbol() != " "
@@ -87,8 +147,9 @@ fn text_in_color(buffer: &Buffer, color: ratatui::style::Color) -> String {
 /// The caret is the only thing drawn with the foreground colour as its
 /// background, so it can be found by colour rather than by column arithmetic.
 fn caret_cells(buffer: &Buffer, theme: &Theme) -> Vec<(u16, u16, String)> {
-    (1..buffer.area.height.saturating_sub(2))
-        .flat_map(|y| (1..buffer.area.width.saturating_sub(1)).map(move |x| (x, y)))
+    let area = rows_for(buffer.area).words;
+    (area.y..area.y + area.height)
+        .flat_map(|y| (area.x..area.x + area.width).map(move |x| (x, y)))
         .filter(|(x, y)| buffer[(*x, *y)].bg == theme.foreground)
         .map(|(x, y)| (x, y, buffer[(x, y)].symbol().to_owned()))
         .collect()
@@ -103,7 +164,7 @@ fn typed_letters_are_painted_in_the_correct_colour() {
     for c in "wo".chars() {
         app.type_char(c);
     }
-    let buffer = render(&app, 40, 10);
+    let buffer = render(&app, 40, 20);
 
     assert_eq!(
         text_in_color(&buffer, theme.correct),
@@ -131,7 +192,7 @@ fn a_mistyped_letter_turns_red_but_the_caret_still_moves_on() {
     for c in "woid".chars() {
         app.type_char(c);
     }
-    let buffer = render(&app, 40, 10);
+    let buffer = render(&app, 40, 20);
 
     // The mistake is shown against the character that should have been typed, so
     // the third cell is red and still reads 'r'.
@@ -159,7 +220,7 @@ fn a_committed_word_keeps_its_own_colour_and_does_not_bleed_into_the_next() {
         app.type_char(c);
     }
     app.type_char('x');
-    let buffer = render(&app, 40, 10);
+    let buffer = render(&app, 40, 20);
 
     assert_eq!(
         text_in_color(&buffer, theme.correct),
@@ -186,7 +247,7 @@ fn the_word_view_scrolls_so_the_caret_never_leaves_the_screen() {
     for cursor in 0..words.len() {
         app.set_words(words.clone());
         app.set_cursor_word(cursor);
-        let buffer = render(&app, 12, 8);
+        let buffer = render(&app, 12, 20);
         let area = word_area(&buffer);
         let active = &words[cursor];
         assert!(
@@ -202,7 +263,7 @@ fn scrolling_actually_hides_earlier_words() {
     let words = single_char_words();
     app.set_words(words.clone());
     app.set_cursor_word(words.len() - 1);
-    let area = word_area(&render(&app, 12, 8));
+    let area = word_area(&render(&app, 12, 20));
     assert!(
         !area.contains(&words[0]),
         "the first word should have scrolled off:\n{area}"
@@ -222,7 +283,7 @@ fn the_caret_is_a_single_cell_on_the_active_character() {
         let mut app = app();
         app.set_words(words.iter().map(|w| (*w).to_owned()).collect());
         app.set_cursor_word(cursor);
-        let buffer = render(&app, 40, 10);
+        let buffer = render(&app, 40, 20);
 
         let painted: Vec<(u16, u16, String)> = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
@@ -255,10 +316,32 @@ fn a_narrow_terminal_does_not_panic() {
 }
 
 #[test]
-fn a_one_cell_terminal_still_shows_a_border() {
+fn a_one_cell_terminal_still_renders() {
     let buffer = render(&app(), 1, 1);
-    let screen = lines(&buffer);
-    assert_eq!(screen.len(), 1);
+    assert_eq!(lines(&buffer).len(), 1);
+}
+
+/// The chart is live: it appears once a test has run a whole second.
+#[test]
+fn the_chart_appears_once_the_test_has_run() {
+    let mut app = app();
+    app.set_words(vec!["word".to_owned()]);
+    let rows = rows_for(render(&app, 60, 20).area).chart;
+    assert!(
+        area_text(&render(&app, 60, 20), rows).trim().is_empty(),
+        "an unstarted test has nothing to plot"
+    );
+
+    for c in "word ".chars() {
+        app.type_char(c);
+    }
+    app.set_elapsed(std::time::Duration::from_millis(3200));
+    let buffer = render(&app, 60, 20);
+    let chart = area_text(&buffer, rows);
+    assert!(
+        chart.contains('█') || chart.contains('─'),
+        "the chart is empty after three seconds: {chart:?}"
+    );
 }
 
 #[test]

@@ -1,9 +1,15 @@
 //! Typing screen: the main test view.
+//!
+//! Laid out the way the website is — words in the middle, live chart under
+//! them, counters on one line along the bottom — because that arrangement is
+//! what lets you read a test at a glance. A box drawn around everything and a
+//! status bar in the corner made a thing that should feel like typing feel like
+//! a program.
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::action::Action;
@@ -11,27 +17,98 @@ use crate::app::App;
 use crate::config::theme::Theme;
 use crate::engine::{Word, WordState};
 use crate::screens::{Effect, Screen, ScreenKind};
+use crate::widgets;
+
+/// How many rows the live chart takes on the typing screen.
+///
+/// Enough for the two series to be told apart. The results screen gives it
+/// more, because by then there is nothing else competing for the eye.
+const CHART_ROWS: u16 = 6;
+
+/// The fewest rows the word pane is allowed to be squeezed down to.
+const MIN_WORD_ROWS: u16 = 4;
+
+/// The widest the chart is ever drawn, so it stays a chart rather than a
+/// full-bleed texture on a wide terminal.
+const CHART_WIDTH: u16 = 72;
+
+/// Rows left blank between the words and the chart, and between the chart and
+/// the counters, so the three bands do not run into each other.
+const GAP: u16 = 1;
 
 #[derive(Debug, Default)]
 pub struct Typing;
 
+/// The bands the typing screen is drawn in.
+///
+/// Exposed because "where are the words on screen" is a question the render
+/// tests need answered, and hard-coding row arithmetic in two places is how a
+/// layout change breaks tests that were not testing the layout at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypingRows {
+    pub header: Rect,
+    pub words: Rect,
+    pub chart: Rect,
+    pub counters: Rect,
+}
+
+/// Splits a screen into the typing screen's bands.
+///
+/// The words come first, because a test with no room for the words is a test you
+/// cannot see and the chart is decoration. So the chart is drawn out of what is
+/// left after the words have a usable window, and on a terminal too short to
+/// hold both it is dropped entirely rather than squeezed — ratatui's own solver
+/// would give the fixed-height rows priority and leave the words nothing.
+///
+/// The header and the counters always keep their row, because they are the only
+/// place the word list and the numbers live.
+pub fn rows_for(area: Rect) -> TypingRows {
+    let bottom = area.y + area.height;
+
+    let header = Rect::new(area.x, area.y, area.width, 1.min(area.height));
+    let cursor = area.y + header.height;
+
+    let counters = Rect::new(
+        area.x,
+        bottom.saturating_sub(1),
+        area.width,
+        1.min(area.height),
+    );
+    let free = bottom
+        .saturating_sub(cursor)
+        .saturating_sub(counters.height);
+
+    let wants_chart = free >= MIN_WORD_ROWS + CHART_ROWS + 2 * GAP;
+    let chart_height = if wants_chart { CHART_ROWS } else { 0 };
+    let gaps = if wants_chart { 2 * GAP } else { 0 };
+    let words_height = free.saturating_sub(chart_height + gaps);
+
+    let words = Rect::new(area.x, cursor, area.width, words_height);
+    let chart = Rect::new(
+        area.x,
+        words.y + words.height + GAP,
+        area.width,
+        chart_height,
+    );
+
+    TypingRows {
+        header,
+        words,
+        chart,
+        counters,
+    }
+}
+
 impl Screen for Typing {
     fn render(&self, app: &App, frame: &mut Frame) {
         let theme = app.theme();
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(Span::styled(" monkeytuipe ", theme.heading()))
-            .style(theme.base());
-        let area = block.inner(frame.area());
-        frame.render_widget(block, frame.area());
+        frame.render_widget(Paragraph::new("").style(theme.base()), frame.area());
 
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Fill(1), Constraint::Length(1)])
-            .split(area);
-
-        render_words(app, frame, rows[0], theme);
-        render_stats(app, frame, rows[1], theme);
+        let rows = rows_for(frame.area());
+        render_header(app, frame, rows.header, theme);
+        render_words(app, frame, rows.words, theme);
+        render_chart(app, frame, rows.chart, theme);
+        render_counters(app, frame, rows.counters, theme);
     }
 
     fn handle(&mut self, action: Action) -> Vec<Effect> {
@@ -54,41 +131,123 @@ impl Screen for Typing {
     }
 }
 
-/// The word list, coloured per character, with the caret on the next character
-/// to type.
+/// The name on the left, the word list on the right, nothing in the middle.
+fn render_header(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
+    let left = Span::styled(" monkeytuipe ", theme.heading());
+    let right = Span::styled(format!(" {} ", app.language_status()), theme.chrome());
+    let gap = (area.width as usize)
+        .saturating_sub(1 + 13)
+        .saturating_sub(right.content.chars().count());
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![left, Span::raw(" ".repeat(gap)), right])),
+        area,
+    );
+}
+
+/// One line of the word pane: which words it holds and how wide it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WordLine {
+    /// Index of the first word on the line.
+    first: usize,
+    /// How many words it holds.
+    count: usize,
+    /// Display width, used for the horizontal centring.
+    width: usize,
+}
+
+/// Wraps a run of words into lines of at most `width` columns.
 ///
-/// When the words no longer fit, the view scrolls so the active word stays visible.
+/// A word is never split, which is what the website does and what keeps the
+/// caret attached to its character: if a word is wider than the whole pane it
+/// gets a line to itself and overflows rather than being torn in half.
+///
+/// Wrapping is done here rather than left to ratatui because the pane has to
+/// know where the active word *landed* — that is what decides which lines are
+/// worth drawing — and a widget that wraps on its own gives no answer.
+fn wrap_words(widths: &[usize], width: usize) -> Vec<WordLine> {
+    if widths.is_empty() {
+        return Vec::new();
+    }
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut start = 0usize;
+    let mut x = 0usize;
+
+    for (index, word_width) in widths.iter().copied().enumerate() {
+        let needed = if index == start { 0 } else { 1 } + word_width;
+        if x + needed > width && index > start {
+            lines.push(WordLine {
+                first: start,
+                count: index - start,
+                width: x,
+            });
+            start = index;
+            x = word_width;
+        } else {
+            x += needed;
+        }
+    }
+    lines.push(WordLine {
+        first: start,
+        count: widths.len() - start,
+        width: x,
+    });
+    lines
+}
+
+/// The word list, centred both ways, coloured per character, with the caret on
+/// the next character to type.
+///
+/// The active line sits in the middle of the pane, and the block is centred in
+/// it — the website's arrangement, and the reason a test reads as a thing being
+/// typed rather than as a list being consumed from the top.
 fn render_words(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
     let words = app.test().words();
-    if words.is_empty() {
+    if words.is_empty() || area.width == 0 || area.height == 0 {
         return;
     }
 
-    let visible = (area.height as usize).max(1);
-    let first = app
-        .scroll_offset(visible)
-        .min(words.len().saturating_sub(visible));
-    let active = app.cursor_word();
+    let lines = wrap_words(&app.word_widths(), area.width as usize);
+    let height = area.height as usize;
 
-    let mut spans: Vec<Span> = Vec::new();
-    for (index, word) in words.iter().enumerate().skip(first).take(visible) {
-        if index > first {
-            spans.push(Span::raw(" "));
+    // Scroll so the active word's line is in the middle, and centre the block
+    // when there are fewer lines than the pane is tall.
+    let active_line = lines
+        .iter()
+        .position(|line| {
+            let first = line.first;
+            first <= app.cursor_word() && app.cursor_word() < first + line.count
+        })
+        .unwrap_or(0);
+    let drawn = height.min(lines.len());
+    let first_line = active_line.saturating_sub((drawn.saturating_sub(1)) / 2);
+    let padding = (height - drawn.min(lines.len() - first_line)) / 2;
+
+    let mut out: Vec<Line> = Vec::new();
+    for _ in 0..padding {
+        out.push(Line::default());
+    }
+    for line in &lines[first_line..(first_line + drawn).min(lines.len())] {
+        let mut spans: Vec<Span> = Vec::new();
+        for offset in 0..line.count {
+            let index = line.first + offset;
+            let word = &words[index];
+            if offset > 0 {
+                spans.push(Span::raw(" "));
+            }
+            if index == app.cursor_word() {
+                spans.extend(active_word(word, theme));
+            } else {
+                spans.push(Span::styled(
+                    word.text(),
+                    settled_style(word.state(), theme),
+                ));
+            }
         }
-        if index == active {
-            spans.extend(active_word(word, theme));
-        } else {
-            spans.push(Span::styled(
-                word.text(),
-                settled_style(word.state(), theme),
-            ));
-        }
+        out.push(Line::from(spans));
     }
 
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false }),
-        area,
-    );
+    frame.render_widget(Paragraph::new(out).alignment(Alignment::Center), area);
 }
 
 /// The style of a word that is no longer being typed.
@@ -147,25 +306,127 @@ fn active_word(word: &Word, theme: Theme) -> Vec<Span<'static>> {
     spans
 }
 
-fn render_stats(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
-    let started = app.test().is_started();
-    let line = Line::from(vec![
-        Span::styled("wpm ", theme.chrome()),
-        Span::styled(format!("{:.0}", app.wpm()), theme.value()),
-        Span::styled("  acc ", theme.chrome()),
-        Span::styled(format!("{:.0}%", app.accuracy()), theme.value()),
-        Span::styled("  time ", theme.chrome()),
-        Span::styled(app.countdown(), theme.value()),
-        Span::styled("  ·  ", theme.chrome()),
-        Span::styled(app.language_status(), theme.chrome()),
-        Span::styled(
-            if started {
-                "  ·  tab skip · ctrl+r restart · f2 settings"
-            } else {
-                "  ·  type to start · ctrl+c quit"
-            },
-            theme.chrome(),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+/// The live chart, centred and capped in width.
+fn render_chart(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
+    let chart = app.chart();
+    if chart.is_empty() {
+        return;
+    }
+    let width = CHART_WIDTH.min(area.width);
+    let left = area.x + (area.width - width) / 2;
+    let chart_area = Rect::new(left, area.y, width, area.height);
+    widgets::render(&chart, chart_area, frame.buffer_mut(), theme);
+}
+
+/// The counters, all on one line and centred, the way the site shows them.
+fn render_counters(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
+    let hint = if app.test().is_started() {
+        "tab skip · ctrl+r restart · f2 settings"
+    } else {
+        "type to start · ctrl+c quit"
+    };
+
+    let mut spans = Vec::new();
+    for (label, value) in [
+        ("wpm", format!("{:.0}", app.wpm())),
+        ("acc", format!("{:.0}%", app.accuracy())),
+        ("time", app.countdown()),
+    ] {
+        spans.push(Span::styled(format!("{label} "), theme.chrome()));
+        spans.push(Span::styled(value, theme.value()));
+        spans.push(Span::raw("  "));
+    }
+    spans.push(Span::styled(format!("·  {hint}"), theme.chrome()));
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+        area,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The lines `wrap_words` produced, as `(first word, word count, width)`.
+    fn lines_of(widths: &[usize], width: usize) -> Vec<(usize, usize, usize)> {
+        wrap_words(widths, width)
+            .into_iter()
+            .map(|line| (line.first, line.count, line.width))
+            .collect()
+    }
+
+    #[test]
+    fn words_that_fit_stay_on_one_line() {
+        assert_eq!(
+            lines_of(&[3, 5, 5, 3], 40),
+            [(0, 4, 3 + 1 + 5 + 1 + 5 + 1 + 3)]
+        );
+    }
+
+    #[test]
+    fn a_line_breaks_before_it_overflows() {
+        // 3 + 1 + 5 = 9; a third word would need 15, which does not fit in 14.
+        assert_eq!(lines_of(&[3, 5, 5, 3], 14), [(0, 2, 9), (2, 2, 9)]);
+        assert_eq!(lines_of(&[3, 5, 5, 3], 15), [(0, 3, 15), (3, 1, 3)]);
+    }
+
+    #[test]
+    fn a_word_exactly_the_width_of_the_pane_still_fits() {
+        assert_eq!(lines_of(&[10], 10), [(0, 1, 10)]);
+        assert_eq!(lines_of(&[10, 3], 10), [(0, 1, 10), (1, 1, 3)]);
+    }
+
+    #[test]
+    fn a_word_wider_than_the_pane_gets_a_line_to_itself() {
+        // Tearing a word across lines would detach the caret from its character.
+        assert_eq!(
+            lines_of(&[2, 30, 2], 10),
+            [(0, 1, 2), (1, 1, 30), (2, 1, 2)]
+        );
+    }
+
+    #[test]
+    fn every_word_lands_on_exactly_one_line() {
+        let widths = [3, 5, 5, 3, 8, 1, 1, 1, 9, 2];
+        for width in 1..=40usize {
+            let lines = wrap_words(&widths, width);
+            let mut seen: Vec<usize> = lines
+                .iter()
+                .flat_map(|l| l.first..l.first + l.count)
+                .collect();
+            seen.sort_unstable();
+            assert_eq!(
+                seen,
+                (0..widths.len()).collect::<Vec<_>>(),
+                "width {width} lost or duplicated a word"
+            );
+        }
+    }
+
+    #[test]
+    fn the_lines_never_exceed_the_width_except_for_an_oversized_word() {
+        let widths = [3, 5, 5, 3, 8, 1, 1, 1, 9, 2];
+        for width in 1..=40usize {
+            for line in wrap_words(&widths, width) {
+                let oversized = line.count == 1 && widths[line.first] > width;
+                assert!(
+                    oversized || line.width <= width,
+                    "width {width}: line {:?} overflows",
+                    (line.first, line.count, line.width)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_words_makes_no_lines() {
+        assert!(wrap_words(&[], 40).is_empty());
+    }
+
+    #[test]
+    fn a_zero_width_pane_still_terminates() {
+        // Width 0 would otherwise wrap after every word, forever.
+        assert_eq!(lines_of(&[3, 5], 0).len(), 2);
+    }
 }

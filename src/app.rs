@@ -239,57 +239,24 @@ impl App {
         self.test.active_index()
     }
 
-    /// The first word index to draw for a caret on `cursor`, chosen so the
-    /// active word stays on screen.
-    ///
-    /// The active word is kept one third of the way down the window rather than
-    /// pinned to the top, which leaves finished words visible above it.
-    ///
-    /// The caret is a parameter rather than read from the engine so that the
-    /// geometry can be exercised at any position without having to fake a run of
-    /// keystrokes to get there.
-    pub fn scroll_offset_from(&self, cursor: usize, visible: usize) -> usize {
-        if visible == 0 {
-            return 0;
-        }
-        let context = (visible - 1) / 3;
-        cursor.saturating_sub(context)
-    }
-
-    /// [`Self::scroll_offset_from`] for the live caret position.
-    pub fn scroll_offset(&self, visible: usize) -> usize {
-        self.scroll_offset_from(self.cursor_word(), visible)
-    }
-
-    /// Column of the caret within the drawn word line, for a caret on `cursor`.
-    ///
-    /// The caret sits at the start of the active word, so this is the display
-    /// width of everything drawn before it: the words from the scroll offset up
-    /// to (but excluding) the active word, plus one space between each pair.
-    ///
-    /// `visible` must be the same value passed to
-    /// [`scroll_offset_from`](Self::scroll_offset_from), otherwise the caret
-    /// lands on the wrong cell.
-    pub fn caret_column_from(&self, cursor: usize, visible: usize) -> usize {
-        use unicode_width::UnicodeWidthStr;
-
-        let first = self.scroll_offset_from(cursor, visible);
-        let mut column = 0usize;
-        for word in self.test.words().iter().take(cursor).skip(first) {
-            column += word.text().width() + 1;
-        }
-        column
-    }
-
-    /// [`Self::caret_column_from`] for the live caret position.
-    pub fn caret_column(&self, visible: usize) -> usize {
-        self.caret_column_from(self.cursor_word(), visible)
-    }
-
     /// The character under the caret, if the test has not run out of words.
     pub fn current_char(&self) -> Option<char> {
         let word = self.test.active_word();
         word.char_at(word.input_len_utf16())
+    }
+
+    /// The display width of every word, for laying the word pane out.
+    ///
+    /// The pane wraps the words itself rather than letting ratatui do it, because
+    /// it needs to know which line the active word landed on in order to put it
+    /// in the middle — and a wrapping widget will not say.
+    pub fn word_widths(&self) -> Vec<usize> {
+        use unicode_width::UnicodeWidthStr;
+        self.test
+            .words()
+            .iter()
+            .map(|word| word.text().width())
+            .collect()
     }
 
     // ---- live counters -------------------------------------------------
@@ -313,13 +280,19 @@ impl App {
         counts
     }
 
-    /// Live words per minute, from the characters produced so far.
+    /// Live words per minute.
+    ///
+    /// `correct_word`, not `all_correct`: the website's live counter divides
+    /// `getChars(...).correctWord` by the elapsed time, and so does its chart.
+    /// Counting every matching character instead makes the number disagree with
+    /// the site's and with the chart drawn right above it, which is worse than
+    /// either being a different measure.
     pub fn wpm(&self) -> f64 {
         let seconds = self.elapsed_secs();
         if seconds <= 0.0 {
             return 0.0;
         }
-        calculate_wpm(f64::from(self.live_chars().all_correct), seconds)
+        calculate_wpm(f64::from(self.live_chars().correct_word), seconds)
     }
 
     /// Live accuracy, as a percentage of keystrokes that were right.
@@ -955,99 +928,6 @@ mod tests {
         assert_eq!(app.wpm(), 0.0);
     }
 
-    #[test]
-    fn scroll_offset_keeps_the_active_word_visible() {
-        let app = app();
-        for visible in 1..=8usize {
-            for cursor in 0..app.test().words().len() {
-                let first = app.scroll_offset_from(cursor, visible);
-                assert!(cursor >= first, "word {cursor} is above the window");
-                assert!(
-                    cursor < first + visible,
-                    "word {cursor} is past the window (first={first}, visible={visible})"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_one_line_window_shows_only_the_active_word() {
-        let app = app();
-        assert_eq!(
-            app.scroll_offset_from(7, 1),
-            7,
-            "one row can only hold the active word"
-        );
-        assert_eq!(app.caret_column_from(7, 1), 0);
-    }
-
-    #[test]
-    fn caret_column_equals_the_width_of_what_is_drawn_before_it() {
-        use unicode_width::UnicodeWidthStr;
-
-        let app = app();
-        for visible in 1..=8usize {
-            for cursor in 0..app.test().words().len() {
-                let first = app.scroll_offset_from(cursor, visible);
-                let expected: usize = app
-                    .test()
-                    .words()
-                    .iter()
-                    .take(cursor)
-                    .skip(first)
-                    .map(|word| word.text().width() + 1)
-                    .sum();
-                assert_eq!(
-                    app.caret_column_from(cursor, visible),
-                    expected,
-                    "visible={visible} cursor={cursor}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn caret_column_counts_words_and_gaps() {
-        let app = app_with(&["the", "quick", "brown", "fox"]);
-        // the(3) quick(5) brown(5) ...
-        // A four-row window keeps one word of context above the active word, so
-        // the window starts at `cursor - 1` once the cursor passes the first row.
-        assert_eq!(app.scroll_offset_from(0, 4), 0);
-        assert_eq!(app.caret_column_from(0, 4), 0);
-
-        assert_eq!(app.scroll_offset_from(1, 4), 0);
-        assert_eq!(app.caret_column_from(1, 4), 4, "'the' plus one space");
-
-        assert_eq!(
-            app.scroll_offset_from(2, 4),
-            1,
-            "'the' has scrolled off the top"
-        );
-        assert_eq!(app.caret_column_from(2, 4), 6, "'quick' plus one space");
-    }
-
-    #[test]
-    fn caret_column_never_lands_past_the_window() {
-        use unicode_width::UnicodeWidthStr;
-
-        let app = app();
-        for cursor in 0..app.test().words().len() {
-            let column = app.caret_column_from(cursor, 3);
-            let drawn: usize = app
-                .test()
-                .words()
-                .iter()
-                .skip(app.scroll_offset_from(cursor, 3))
-                .take(3)
-                .map(|word| word.text().width())
-                .sum();
-            assert!(
-                column <= drawn,
-                "caret at column {column} but the window is only {drawn} wide"
-            );
-        }
-    }
-
     // ---- live engine wiring --------------------------------------------
 
     #[test]
@@ -1328,6 +1208,31 @@ mod tests {
         let app = app();
         assert!(app.chart().is_empty());
         assert_eq!(app.chart().final_wpm(), 0.0);
+    }
+
+    /// The counter and the chart are the same number, drawn twice.
+    ///
+    /// The website divides `correctWord` by the elapsed time for its live
+    /// counter *and* for the last point of the chart. Anything else — counting
+    /// every matching character, say — puts two different figures on one screen.
+    #[test]
+    fn the_live_wpm_is_the_last_point_of_the_chart() {
+        let mut app = app_with(&["the", "quick", "brown", "fox"]);
+        type_text(&mut app, "the quick ");
+        // On a whole second the two are directly comparable, and must match.
+        for seconds in [2u64, 3, 5] {
+            app.set_elapsed(Duration::from_secs(seconds));
+            let chart = app.chart();
+            let last = *chart
+                .wpm
+                .last()
+                .unwrap_or_else(|| panic!("no bucket at {seconds}s"));
+            assert_eq!(
+                app.wpm(),
+                last,
+                "at {seconds}s the counter and the chart disagree"
+            );
+        }
     }
 
     #[test]
