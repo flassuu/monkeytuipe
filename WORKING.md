@@ -37,64 +37,80 @@ Three times this round there was a genuine fork and three times I chose alone:
 
 A wrong guess on a fork is not a bug, it is a wasted feature.
 
-### 2. Map the blast radius before the first edit
+### 2. Gate: the change list, before the first edit
+
+The previous two versions of this rule were statements of intent and both were
+skipped. A rule I can satisfy by *thinking* is a rule I can skip by thinking
+faster, so this one is a gate: **write the list as a tool call** -- a scratch
+file, or the commit-message body.
+
+Six lines, naming **every symbol you will add or change**, before the first edit:
+
+```
+1. delete ThemeName::Terminal          (serde alias on Auto for old configs)
+2. row_value(Theme) -> label()
+3. new View::Themes { selected }
+4. new Effect::SetTheme(ThemeName)
+5. Settings.current_theme, written by the app on BOTH routes
+6. theme_choices() + theme_columns()
+```
+
+In the theme round I had all six in my head by tool call two and wrote none of
+them down. Every one I *discovered* instead -- `current_theme` only when the
+compiler said `no field`, `theme_columns` only when the render came out wrong --
+and each cost a build-error cycle plus a recovery. The render mess was entirely
+downstream of not having had the list.
+
+**Anything not on the list is a separate change.** Two-column layout, a marker
+glyph, four accessors: none were asked for, and they were 30 of that round's 120
+calls.
+
+### 3. Gate: no symbol you have not read
+
+Every identifier I type must come from a read or an `rg` in this session.
+
+Six invented symbols in the theme round, at 2-4 calls each: `Action::Home`,
+`theme_for()`, `app.settings_screen()`, `app.settings_for_test()` (twice),
+`keys_on`, `settings_theme_at`. One `rg` each, or zero -- the file was open the
+whole time.
+
+### 4. Gate: the edit tool, always
+
+**Not "prefer" -- always.** This existed in weaker form and was broken in the very
+next round, by me, while claiming to apply it:
+
+> I was avoiding a failure mode by choosing a tool that fails *silently*. `edit`
+> errors when the old text is missing or ambiguous. `replace` never errors.
+
+What that bought in one round: a function inserted **twice**, mangling a file; an
+anchor that matched a **doc comment** instead of the code; a regex reporting **0
+sites** that I moved straight past; an `impl` block after the test module; a
+method in the wrong `impl`; a variant that never existed. `edit` returns the new
+content, so every one would have been visible the moment it happened.
+
+Two exceptions, both needing a check first: a rename across many files, where
+`rg -c` proves the count; and anything not expressible as one contiguous
+replacement. `write` is for new files, `edit` for everything else, bash for `rg`
+and the toolchain.
+
+The friction that pushed me off it: `edit` needs exact whitespace and `cargo fmt`
+shifts it. The answer is to read the file again -- 1.5 seconds -- not to switch to
+a tool that may not have changed anything.
+
+### 5. Gate: two renders for anything that draws
+
+One as soon as it compiles. One at the end.
+
+The theme picker drew only `auto` for sixty calls and I never looked. Each render
+is twenty seconds; the first would have found it at call forty instead of call one
+hundred. One render at the end is not a gate, it is a receipt.
+
+### 6. Map the blast radius before the first edit
 
 `rg` the symbol. Count the call sites. **More than eight is a design change, not
-an edit.** Thirty seconds, and it is the difference between one edit and twenty.
+an edit.**
 
-### 3. Write the shape down first
-
-The structs, the invariants, the layout rule. Ten lines, in the commit message or
-a comment. Then implement once.
-
-This is the rule that kills rewrites. The top bar is now 1373 lines with `Card`,
-`Metrics`, `Placement`, `Attempt` and `Block`; `Button.label` went from
-`&'static str` (with a `Box::leak` helper to make that work) to `String`; and the
-width question grew four separate functions — `total_width`, `narrowest`,
-`packed_width`, `two_row_minimum` — one per new question, each with its own tests.
-Starting with `String` labels, three cards, and one width function would have made
-two of those four rewrites disappear.
-
-### 4. Use the edit tool. Always.
-
-**Not "prefer" — always.** This rule existed in weaker form and was broken in the
-very next round, by me, while claiming to apply it. So here is why I reached for
-`python3 s.replace` anyway, because knowing the reason is what stops it happening
-again:
-
-> I was avoiding a failure mode by choosing a tool that fails *silently*.
-> `edit` errors when the old text is missing or ambiguous, and recovering costs a
-> re-read. `replace` never errors. So I picked the one whose worst failure is
-> quiet — which is exactly the property that cost me the most.
-
-What that bought, in one round, each found 40 seconds later at compile time in a
-*different* file:
-
-- a function inserted **twice**, mangling `app.rs` — a non-idempotent edit
-- an anchor that matched a **doc comment** instead of the code
-- a regex that reported **0 sites replaced**, and I moved straight on
-- an `impl` block that landed after the test module; a method in the wrong `impl`
-- a variant that never existed
-
-`edit` returns the new content, so every one of those would have been visible the
-moment it happened. The compile is 0.9s; the *read and the guessing* is the
-expensive part, and it is entirely self-inflicted.
-
-**The only exceptions**, and both need a check first:
-
-- A rename across many files: prove the count with `rg -c` before changing it, so
-  "8 sites" is a fact and not a hope.
-- Anything genuinely not expressible as one contiguous replacement.
-
-`write` is for new files. `edit` is for everything else. Bash is for `rg`, the
-toolchain, and `git`.
-
-The friction that pushed me off it: `edit` needs exact whitespace, and a
-`cargo fmt` pass shifts it, so remembered context goes stale. The answer to that
-is to read the file again — about 1.5 seconds — not to switch to a tool that may
-not have changed anything.
-
-### 5. See it, then assert it
+### 7. See it, then assert it
 
 A throwaway `TestBackend` print takes twenty seconds and shows the truth. Write
 assertions **after** seeing it.
@@ -105,7 +121,7 @@ cell colours, and disproved my own theory in one run. Twenty seconds. The
 alternative — reasoning about it — is what produced a confident report that the
 behaviour was fine when I had not looked.
 
-### 6. Narrow tests, one gate
+### 8. Narrow tests, one gate
 
 | command | cached | cold |
 |---|---|---|
@@ -123,7 +139,7 @@ behaviour was fine when I had not looked.
 Running all 611 after every small edit was pure waste: about forty full runs,
 eleven minutes, to learn things a two-second targeted run would have said.
 
-### 7. Tests describe behaviour, not structure
+### 9. Tests describe behaviour, not structure
 
 Every test that broke for the wrong reason was coupled to the implementation.
 
@@ -137,7 +153,7 @@ Ask of every assertion: *would this still be true if the code were written
 differently and correctly?* If not, it is a change detector, and it will fire on
 the next good refactor.
 
-### 8. The commit message describes the diff
+### 10. The commit message describes the diff
 
 Write it **last**, from `git diff --stat`.
 
@@ -146,7 +162,7 @@ and the next commit had to do the work. A commit message written from intent
 instead of from the diff is a claim about code that does not exist, which is the
 worst kind of documentation.
 
-### 9. Parallelise the read-only work
+### 11. Parallelise the read-only work
 
 Subagents for: checking a premise, mapping call sites, drafting a test list from a
 spec. All read-only, all independent of what I am editing. One ran here and found
