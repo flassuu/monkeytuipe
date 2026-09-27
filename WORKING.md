@@ -55,20 +55,44 @@ width question grew four separate functions — `total_width`, `narrowest`,
 Starting with `String` labels, three cards, and one width function would have made
 two of those four rewrites disappear.
 
-### 4. No blind edits
+### 4. Use the edit tool. Always.
 
-Every scripted `replace` must **assert its anchor** and print what it changed. A
-replacement that reports *0 sites* is a failure, not a no-op — one of mine did,
-and I moved on.
+**Not "prefer" — always.** This rule existed in weaker form and was broken in the
+very next round, by me, while claiming to apply it. So here is why I reached for
+`python3 s.replace` anyway, because knowing the reason is what stops it happening
+again:
 
-Prefer the edit tool with real surrounding context. It fails loudly at the right
-place. A scripted `replace` fails silently, or matches the doc comment instead of
-the code, or applies twice.
+> I was avoiding a failure mode by choosing a tool that fails *silently*.
+> `edit` errors when the old text is missing or ambiguous, and recovering costs a
+> re-read. `replace` never errors. So I picked the one whose worst failure is
+> quiet — which is exactly the property that cost me the most.
 
-Damage from this in one round: a function inserted twice and the file mangled; a
-doc-comment anchor matched instead of the code; an `impl` block that landed after
-the test module; a method that landed in the wrong `impl`; a `Key::Words` that did
-not exist. Each cost a confusing error, a read, and a fix.
+What that bought, in one round, each found 40 seconds later at compile time in a
+*different* file:
+
+- a function inserted **twice**, mangling `app.rs` — a non-idempotent edit
+- an anchor that matched a **doc comment** instead of the code
+- a regex that reported **0 sites replaced**, and I moved straight on
+- an `impl` block that landed after the test module; a method in the wrong `impl`
+- a variant that never existed
+
+`edit` returns the new content, so every one of those would have been visible the
+moment it happened. The compile is 0.9s; the *read and the guessing* is the
+expensive part, and it is entirely self-inflicted.
+
+**The only exceptions**, and both need a check first:
+
+- A rename across many files: prove the count with `rg -c` before changing it, so
+  "8 sites" is a fact and not a hope.
+- Anything genuinely not expressible as one contiguous replacement.
+
+`write` is for new files. `edit` is for everything else. Bash is for `rg`, the
+toolchain, and `git`.
+
+The friction that pushed me off it: `edit` needs exact whitespace, and a
+`cargo fmt` pass shifts it, so remembered context goes stale. The answer to that
+is to read the file again — about 1.5 seconds — not to switch to a tool that may
+not have changed anything.
 
 ### 5. See it, then assert it
 
