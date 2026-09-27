@@ -418,28 +418,54 @@ impl Settings {
     /// The same shape as the language browser and for the same reason. Escape
     /// leaves *without* choosing, so a user who opened the wrong thing is not
     /// left with a theme they did not pick.
+    ///
+    /// Moving the highlight **previews**: the theme under it is applied as you go, so
+    /// the screen is repainted in the theme you are looking at before you commit to
+    /// it. A theme is a decision about every colour on the screen, and nineteen names
+    /// in a list say nothing about any of them — you cannot tell a readable theme from
+    /// an unreadable one by its name. It used to be applied only on `enter`, which
+    /// means choosing a theme blind and then looking at the result, and if you did not
+    /// like it you had to come back and do it again.
+    ///
+    /// Escape puts the theme that was in use *before the picker opened* back. Not the
+    /// highlighted one: a preview that leaves its last preview behind on cancel is a
+    /// preview that changed a setting the user declined to change.
     fn handle_themes(&mut self, action: Action, selected: usize) -> Vec<Effect> {
         let all = Self::theme_choices();
         let last = all.len().saturating_sub(1);
+        let preview = |index: usize| -> Vec<Effect> {
+            all.get(index)
+                .filter(|theme| **theme != self.current_theme)
+                .map(|theme| vec![Effect::PreviewTheme(*theme)])
+                .unwrap_or_default()
+        };
         match action {
             Action::Quit => vec![Effect::Quit],
             // The walk wraps, for the same reason the row list's does: a list that
             // stops at the ends has two ends to stop at.
             Action::Up => {
-                self.view = View::Themes {
-                    selected: selected.saturating_sub(1),
-                };
-                Vec::new()
+                let next = selected.saturating_sub(1);
+                self.view = View::Themes { selected: next };
+                preview(next)
             }
             Action::Down => {
-                self.view = View::Themes {
-                    selected: (selected + 1).min(last),
-                };
-                Vec::new()
+                let next = (selected + 1).min(last);
+                self.view = View::Themes { selected: next };
+                preview(next)
             }
             Action::Back => {
                 self.view = View::Rows;
-                Vec::new()
+                // Back to what was in use, which is `current_theme` — the app writes
+                // that field on every theme change *except* a preview's, so it is
+                // still the theme from before the picker opened.
+                let restore = all
+                    .iter()
+                    .find(|theme| **theme == self.current_theme)
+                    .copied();
+                restore
+                    .filter(|theme| Some(*theme) != all.get(selected).copied())
+                    .map(|theme| vec![Effect::PreviewTheme(theme)])
+                    .unwrap_or_default()
             }
             Action::Select | Action::StartTest | Action::Restart => {
                 let Some(theme) = all.get(selected) else {
@@ -966,6 +992,65 @@ mod tests {
                 screen.view_kind()
             );
         }
+    }
+
+    /// Moving the highlight previews the theme, and cancelling puts back the one that
+    /// was in use before the picker opened.
+    ///
+    /// A theme is a decision about every colour on the screen and nineteen names say
+    /// nothing about any of them, so the only way to tell a readable theme from an
+    /// unreadable one is to see it. It used to be applied on `enter` alone, which
+    /// means choosing blind, looking, and coming back.
+    #[test]
+    fn moving_in_the_picker_previews_and_escape_restores() {
+        let mut app = self::app();
+        app.show_screen(crate::screens::ScreenKind::Settings);
+        walk_app(&mut app, Row::Theme);
+        app.press(KeyCode::Enter);
+        let before = app.theme_name();
+
+        // Each step down previews that theme rather than waiting for `enter`.
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            app.press(KeyCode::Down);
+            let now = app.theme_name();
+            assert_ne!(now, before, "the preview did not change the theme");
+            seen.push(now);
+        }
+        assert!(
+            seen.windows(2).all(|w| w[0] != w[1]),
+            "the preview did not follow the highlight: {seen:?}"
+        );
+
+        // Escape puts back the theme from before the picker opened — not the one the
+        // highlight was left on, which is the whole point of cancelling.
+        app.press(KeyCode::Esc);
+        assert_eq!(app.theme_name(), before, "escape kept the last preview");
+        assert_eq!(app.view_kind(), Some(&View::Rows));
+
+        // And a preview is a look, not a decision: nothing was written.
+        assert!(
+            !app.is_dirty(),
+            "previewing a theme marked the config dirty"
+        );
+
+        // Choosing is what makes it stick.
+        let mut app = self::app();
+        app.show_screen(crate::screens::ScreenKind::Settings);
+        walk_app(&mut app, Row::Theme);
+        app.press(KeyCode::Enter);
+        app.press(KeyCode::Down);
+        let previewed = app.theme_name();
+        app.press(KeyCode::Enter);
+        assert_eq!(
+            app.theme_name(),
+            previewed,
+            "enter did not keep the preview"
+        );
+        assert!(
+            app.is_dirty(),
+            "choosing a theme did not mark the config dirty"
+        );
     }
 
     /// The picker shows every theme, with the current one under the highlight and

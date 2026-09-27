@@ -58,6 +58,16 @@ pub enum Effect {
     /// the one that was clicked. A setting reached two ways with one effect would
     /// mean the effect has to know which way it arrived.
     SetTheme(crate::config::theme::ThemeName),
+    /// Show a theme without choosing it, while the highlight is still moving.
+    ///
+    /// Separate from [`Effect::SetTheme`] for the one reason that matters: this one
+    /// does **not** mark the config dirty. A preview is a look, and a look that
+    /// writes the file is a look that changes a setting the user has not made yet —
+    /// so quitting from inside the picker would save a theme they only ever looked at.
+    ///
+    /// It does set the live theme, because that is the entire point: nineteen names
+    /// say nothing about what nineteen sets of colours look like.
+    PreviewTheme(crate::config::theme::ThemeName),
     /// Store an ApeKey the user typed.
     SetApeKey(String),
     /// Store a custom passage the user typed.

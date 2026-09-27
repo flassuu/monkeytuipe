@@ -172,7 +172,16 @@ impl Theme {
     ) {
         let wanted = [self.accent, self.correct, self.incorrect, self.extra];
         for slot in self.slots_mut() {
-            *slot = plain(*slot);
+            // `Reset` is not a colour to be rounded, it is the *absence* of one: the
+            // terminal's own default. Rounding it would replace "whatever you use"
+            // with a specific entry of the palette — and black, since that is the
+            // nearest thing to a colour that has no RGB — which is the exact opposite
+            // of what a slot set to `Reset` is asking for. The `auto` theme is built
+            // out of `Reset`s, so this is what keeps it deferring to the terminal on
+            // a terminal with sixteen colours.
+            if !matches!(slot, Color::Reset) {
+                *slot = plain(*slot);
+            }
         }
         for (slot, source) in self.coloured_slots_mut().iter_mut().zip(wanted) {
             **slot = keep_hue(source);
@@ -249,6 +258,30 @@ const ANSI16: [(u8, u8, u8); 16] = [
 fn rgb(color: Color) -> (f64, f64, f64) {
     match color {
         Color::Rgb(r, g, b) => (f64::from(r), f64::from(g), f64::from(b)),
+        // The sixteen named colours are the same sixteen palette entries under the
+        // names ANSI gives them, so they get the same RGB. This has to be right or
+        // rounding is nonsense for them: every named colour used to fall through to
+        // the black arm below, so on a sixteen-colour terminal the `auto` theme —
+        // which is built entirely from named colours, because "the terminal's own
+        // red" *is* `Color::Red` — rounded its yellow to dark red and its green to
+        // black. A theme whose whole claim is that the colours are the terminal's
+        // came out as a different set of colours from the one it asked for.
+        Color::Black => entry(0),
+        Color::Red => entry(1),
+        Color::Green => entry(2),
+        Color::Yellow => entry(3),
+        Color::Blue => entry(4),
+        Color::Magenta => entry(5),
+        Color::Cyan => entry(6),
+        Color::Gray => entry(7),
+        Color::DarkGray => entry(8),
+        Color::LightRed => entry(9),
+        Color::LightGreen => entry(10),
+        Color::LightYellow => entry(11),
+        Color::LightBlue => entry(12),
+        Color::LightMagenta => entry(13),
+        Color::LightCyan => entry(14),
+        Color::White => entry(15),
         // The fixed palette, and then the 6x6x6 cube. Anything past 231 is the
         // greyscale ramp, which is the colour itself repeated, so the ramp is
         // handled by `nearest_256` rather than here.
@@ -261,11 +294,17 @@ fn rgb(color: Color) -> (f64, f64, f64) {
             let value = f64::from(8 + (i - 232) * 10);
             (value, value, value)
         }
-        // Named and reset colours have no RGB value of their own. Black is the
-        // conservative answer: rounding an unknown colour must not turn a
-        // terminal's own default background into something else.
+        // `Reset` has no RGB of its own — it means "whatever the terminal uses" — and
+        // black is the conservative answer, because rounding a terminal's own default
+        // background into something else is the one thing that must not happen.
         _ => (0.0, 0.0, 0.0),
     }
+}
+
+/// One of the sixteen palette entries, as RGB.
+fn entry(index: usize) -> (f64, f64, f64) {
+    let (r, g, b) = ANSI16[index];
+    (f64::from(r), f64::from(g), f64::from(b))
 }
 
 /// The closest colour in the 256-colour palette.

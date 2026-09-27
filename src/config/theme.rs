@@ -3,6 +3,43 @@
 use ratatui::style::{Color, Modifier, Style};
 use serde::{Deserialize, Serialize};
 
+/// A theme made of nothing but the terminal's own colours.
+///
+/// This is what `auto` is, and the whole point is that it contains **no colour
+/// anybody chose**. Two kinds of entry, both of which the terminal resolves from its
+/// own configuration:
+///
+/// - `Color::Reset` — the terminal's default foreground or background. Not "black" or
+///   "white": whatever the user's profile says, which is the thing a theme named after
+///   the terminal ought to respect.
+/// - the sixteen palette entries — `Color::Red` is SGR 31, which is the terminal's own
+///   idea of red. A user who has remapped their palette gets their red.
+///
+/// `auto` used to fall back to a bundled theme when the terminal did not answer the
+/// colour query, and that fallback was the monkeytype theme — so on every terminal
+/// that did not answer, `auto` *was* `monkeytype`, and nothing said so. A setting
+/// called "take my terminal's colours" that quietly hands you someone else's is worse
+/// than no setting, because it looks like it worked.
+///
+/// There is no fallback here. If the query answered, [`crate::terminal::palette::build`]
+/// replaces these with the exact RGB values and mixes the in-between shades. If it did
+/// not, every colour below is still the terminal's, and the two cases differ in
+/// precision rather than in kind.
+pub fn terminal_default() -> Theme {
+    Theme {
+        background: Color::Reset,
+        surface: Color::Reset,
+        foreground: Color::Reset,
+        accent: Color::Yellow,
+        correct: Color::Green,
+        incorrect: Color::Red,
+        extra: Color::Blue,
+        // The terminal's own "bright black", which is the grey every palette agrees
+        // is a grey — rather than a mix of two colours we would have had to guess.
+        muted: Color::DarkGray,
+    }
+}
+
 /// A named theme, serialisable as a bare string in `config.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,13 +140,12 @@ impl ThemeName {
     /// tell which of eighteen dark themes somebody would have chosen.
     pub fn for_terminal(self, terminal: &super::terminal::Terminal) -> Theme {
         match self {
-            // Not a palette: a question, answered once at start-up. The terminal is
-            // asked what its colours are; if it says nothing, the guess below is
-            // the fallback rather than the primary.
+            // Not a palette: a question. The terminal is asked what its colours are,
+            // and where it does not know, the answer is "whatever you would have used
+            // anyway" rather than somebody else's dark grey.
             Self::Auto => {
                 let reported = crate::terminal::palette::reported();
-                let mut theme =
-                    crate::terminal::palette::build(&reported, &Self::auto_for(terminal).resolve());
+                let mut theme = crate::terminal::palette::build(&reported, &terminal_default());
                 terminal.adapt(&mut theme);
                 theme
             }
@@ -420,6 +456,25 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// One slot by name, for a test that is about which slot a colour is in.
+    ///
+    /// Not a lookup a caller should want: a `match` on a string that fails to compile
+    /// when a slot is renamed is a better trade than a `get` that returns `None` and a
+    /// panic three assertions later.
+    pub fn slot(self, name: &str) -> Color {
+        match name {
+            "background" => self.background,
+            "surface" => self.surface,
+            "foreground" => self.foreground,
+            "accent" => self.accent,
+            "correct" => self.correct,
+            "incorrect" => self.incorrect,
+            "extra" => self.extra,
+            "muted" => self.muted,
+            other => panic!("no theme slot called {other:?}"),
+        }
+    }
+
     /// Base style for the whole frame.
     pub fn base(self) -> Style {
         Style::default().fg(self.foreground).bg(self.background)
@@ -578,11 +633,22 @@ mod tests {
         }
     }
 
-    /// The one decision `auto` can get wrong in a way that matters: a dark theme
-    /// on a light terminal is unreadable, and colour depth is only ever a
-    /// degradation.
+    /// `auto` is the terminal's own colours, and the same set of them whatever the
+    /// terminal looks like.
+    ///
+    /// It used to *pick* a theme — solarized light for a light terminal, monkeytype
+    /// for a dark one or an unknown one — which is what made `auto` and `monkeytype`
+    /// the same setting on every terminal that would not answer the colour query. The
+    /// guess also had the wrong failure: a dark theme on a light terminal is
+    /// unreadable, and the guess for "light terminal" came from `COLORFGBG`, which a
+    /// terminal that does not answer the colour query usually does not set either.
+    ///
+    /// There is no picking now. Every colour is either `Color::Reset`, which is the
+    /// terminal's own default, or one of the sixteen palette entries, which is the
+    /// terminal's own idea of that colour. A dark terminal gets its dark and a light
+    /// terminal gets its light, and nothing had to guess which was which.
     #[test]
-    fn auto_picks_a_light_theme_for_a_light_terminal() {
+    fn auto_is_the_terminals_own_colours_and_never_a_bundled_theme() {
         use crate::config::terminal::Terminal;
         // True colour, so nothing is rounded and the colours can be compared
         // directly; the rounding is a separate test.
@@ -602,19 +668,80 @@ mod tests {
             ..Terminal::default()
         };
 
-        assert_eq!(
-            ThemeName::Auto.for_terminal(&light),
-            ThemeName::SolarizedLight.resolve(),
-            "a light terminal must not be given a dark theme"
-        );
-        assert_eq!(
-            ThemeName::Auto.for_terminal(&dark),
-            ThemeName::Monkeytype.resolve()
-        );
-        assert_eq!(
-            ThemeName::Auto.for_terminal(&unknown),
-            ThemeName::Monkeytype.resolve()
-        );
+        for (label, terminal) in [("light", &light), ("dark", &dark), ("unknown", &unknown)] {
+            let theme = ThemeName::Auto.for_terminal(terminal);
+            assert_eq!(
+                theme.background,
+                Color::Reset,
+                "{label}: auto chose a background instead of the terminal's"
+            );
+            assert_eq!(
+                theme.foreground,
+                Color::Reset,
+                "{label}: auto chose a foreground"
+            );
+            assert_eq!(theme.surface, Color::Reset, "{label}: auto chose a surface");
+            for bundled in ThemeName::ALL {
+                assert_ne!(
+                    theme,
+                    bundled.resolve(),
+                    "{label}: auto resolved to the {bundled:?} theme"
+                );
+            }
+        }
+    }
+
+    /// The colours `auto` cannot default are the terminal's palette *entries*, not
+    /// anybody's RGB — a user who has remapped their red gets their red.
+    ///
+    /// Asserted as a *pair* of spellings rather than one, because a terminal with
+    /// few colours is handed the same palette entry in indexed form: `Color::Yellow`
+    /// on a true-colour terminal and `Color::Indexed(3)` on a sixteen-colour one are
+    /// the same request answered twice, and which spelling comes back depends on the
+    /// terminal rather than on the theme.
+    #[test]
+    fn the_colours_auto_cannot_default_are_palette_entries() {
+        use crate::config::terminal::Terminal;
+        let on_truecolor = ThemeName::Auto.for_terminal(&Terminal {
+            color_term: Some("truecolor".to_owned()),
+            ..Terminal::default()
+        });
+        let on_sixteen = ThemeName::Auto.for_terminal(&Terminal::default());
+        // (name, named, indexed) — the ANSI index of each, which is the same number
+        // for both spellings because the named colours *are* the palette entries.
+        let wanted = [
+            ("accent", Color::Yellow, 3u8),
+            ("correct", Color::Green, 2),
+            ("incorrect", Color::Red, 1),
+            ("extra", Color::Blue, 4),
+            ("muted", Color::DarkGray, 8),
+        ];
+        for (name, named, index) in wanted {
+            assert_eq!(
+                on_truecolor.slot(name),
+                named,
+                "{name} on a true-colour terminal"
+            );
+            assert_eq!(
+                on_sixteen.slot(name),
+                Color::Indexed(index),
+                "{name} on a sixteen-colour terminal is not the terminal's own entry"
+            );
+        }
+        // And the three that are the terminal's default stay `Reset` either way, which
+        // is the part that makes the theme defer rather than choose.
+        for terminal in [
+            Terminal {
+                color_term: Some("truecolor".to_owned()),
+                ..Terminal::default()
+            },
+            Terminal::default(),
+        ] {
+            let theme = ThemeName::Auto.for_terminal(&terminal);
+            for name in ["background", "surface", "foreground"] {
+                assert_eq!(theme.slot(name), Color::Reset, "{name} was rounded");
+            }
+        }
     }
 
     /// An explicit theme is never overridden, however wrong the guess would have
@@ -643,6 +770,13 @@ mod tests {
         let _ = light;
     }
 
+    /// An eight-colour terminal gets the eight entries, and still gets the terminal's
+    /// own background.
+    ///
+    /// `Reset` used to be rounded here, to black, which is the nearest thing to a
+    /// colour with no RGB — so on a terminal with few colours `auto` replaced "your
+    /// background" with index 0 and stopped deferring. `Reset` is now left alone: it
+    /// is the absence of a colour, not a colour, and there is nothing to round it to.
     #[test]
     fn auto_adapts_the_colours_to_the_terminals_depth() {
         use crate::config::terminal::Terminal;
@@ -652,11 +786,23 @@ mod tests {
         };
         let theme = ThemeName::Auto.for_terminal(&depth8);
         for color in theme.all_colors() {
-            assert!(
-                matches!(color, Color::Indexed(i) if i < 16),
-                "{color:?} is beyond an eight-colour terminal"
-            );
+            let within = match color {
+                Color::Reset => true,
+                Color::Indexed(i) => i < 16,
+                _ => false,
+            };
+            assert!(within, "{color:?} is beyond an eight-colour terminal");
         }
+        assert_eq!(
+            theme.background,
+            Color::Reset,
+            "auto lost the terminal's background"
+        );
+        assert_eq!(
+            theme.foreground,
+            Color::Reset,
+            "auto lost the terminal's foreground"
+        );
     }
 
     #[test]

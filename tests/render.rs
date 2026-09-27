@@ -209,6 +209,36 @@ fn text_in_color(buffer: &Buffer, app: &App, color: ratatui::style::Color) -> St
     area_text_in_color(buffer, layout_of(app, buffer).words, color)
 }
 
+/// An app in a theme whose slots are all *different* colours.
+///
+/// Three of the tests below find things on screen by their colour, and that only
+/// works if the colours are distinguishable. The default theme is `auto`, which is the
+/// terminal's own colours — and its background is `Color::Reset`, which is not a
+/// colour at all but the *absence* of one, so every cell the renderer did not touch
+/// has it too. "The only cell painted with the foreground as its background" is
+/// therefore true of the entire screen.
+///
+/// The other reason is worse. The bundled `monkeytype` theme has `correct` set to
+/// exactly the same value as `foreground` (`Rgb(212, 212, 212)`), so a test asserting
+/// "typed letters are painted in the correct colour" passed without ever looking at
+/// the correct colour: the active word draws typed-and-right characters in the
+/// *foreground*, and the two happened to be the same. `typed_letters_are_painted_in_
+/// the_correct_colour` had been green for the wrong reason.
+///
+/// So: a real theme, with slots that differ, and the tests below say what they mean.
+fn app_in_colours() -> App {
+    let config = Config {
+        theme: monkeytuipe::config::theme::ThemeName::Gruvbox,
+        ..Config::default()
+    };
+    let mut app = App::new(config, PathBuf::from("/nonexistent/config.toml"));
+    // Two words, so that the first one can finish and settle: a test about a
+    // *finished* word needs a word after it for the cursor to move on to, and a
+    // single-word test can never see a settled word at all.
+    app.set_words(vec!["word".to_owned(), "next".to_owned()]);
+    app
+}
+
 /// The same, restricted to one rectangle.
 fn area_text_in_color(buffer: &Buffer, area: Rect, color: ratatui::style::Color) -> String {
     (area.y..area.y + area.height)
@@ -236,19 +266,33 @@ fn caret_cells(buffer: &Buffer, app: &App, theme: &Theme) -> Vec<(u16, u16, Stri
 
 #[test]
 fn typed_letters_are_painted_in_the_correct_colour() {
-    let mut app = app();
-    app.set_words(vec!["word".to_owned()]);
+    let mut app = app_in_colours();
     let theme = app.theme();
+    // The point of using a real theme: `correct` and `foreground` differ here, so
+    // anything asserted about either is actually about that colour.
+    assert_ne!(
+        theme.correct, theme.foreground,
+        "the test theme has the same correct and foreground, so it cannot tell them apart"
+    );
 
     for c in "wo".chars() {
         app.type_char(c);
     }
     let buffer = render(&app, 40, 20);
 
+    // The word being typed is *not scored yet*, so its right characters are drawn in
+    // the text colour rather than the correct colour. This is the website's rule: a
+    // word turns green when you finish it, not as you type it, so that a green word
+    // always means a word that is finished and cannot change.
+    assert_eq!(
+        text_in_color(&buffer, &app, theme.foreground),
+        "wo",
+        "the two matching letters, in the text colour"
+    );
     assert_eq!(
         text_in_color(&buffer, &app, theme.correct),
-        "wo",
-        "the two matching letters"
+        "",
+        "the word being typed was scored before it was finished"
     );
     assert_eq!(
         text_in_color(&buffer, &app, theme.incorrect),
@@ -256,16 +300,27 @@ fn typed_letters_are_painted_in_the_correct_colour() {
         "nothing was mistyped, so nothing should be red"
     );
 
-    // The caret has moved onto the third letter.
+    // And once the word *is* finished it does take the correct colour, which is the
+    // half that was never being checked.
+    app.type_char('r');
+    app.type_char('d');
+    app.type_char(' ');
+    let buffer = render(&app, 40, 20);
+    assert_eq!(
+        text_in_color(&buffer, &app, theme.correct),
+        "word",
+        "the finished word is not in the correct colour"
+    );
+    // And the caret is on the *next* word now, which is what "finished" means. It was
+    // on the third letter before the word was completed.
     let caret = caret_cells(&buffer, &app, &theme);
     assert_eq!(caret.len(), 1, "one caret: {caret:?}");
-    assert_eq!(caret[0].2, "r", "the caret sits on the next letter");
+    assert_eq!(caret[0].2, "n", "the caret is not on the next word");
 }
 
 #[test]
 fn a_mistyped_letter_turns_red_but_the_caret_still_moves_on() {
-    let mut app = app();
-    app.set_words(vec!["word".to_owned()]);
+    let mut app = app_in_colours();
     let theme = app.theme();
 
     for c in "woid".chars() {
@@ -354,12 +409,17 @@ fn scrolling_actually_hides_earlier_words() {
 fn the_caret_is_a_single_cell_on_the_active_character() {
     // The caret is the only cell painted with the foreground colour as its
     // background, so it can be located by colour rather than by column math.
-    let theme = app().theme();
+    let theme = app_in_colours().theme();
     assert_eq!(theme.caret().bg, Some(theme.foreground));
+    assert_ne!(
+        theme.foreground, theme.background,
+        "the test theme's foreground and background are the same, so locating the \
+         caret by colour finds every cell"
+    );
 
     let words = ["aa", "bbbb", "c"];
     for cursor in 0..words.len() {
-        let mut app = app();
+        let mut app = app_in_colours();
         app.set_words(words.iter().map(|w| (*w).to_owned()).collect());
         app.set_cursor_word(cursor);
         let buffer = render(&app, 40, 20);

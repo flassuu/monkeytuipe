@@ -1605,6 +1605,18 @@ impl App {
                 self.sync_theme_to_screen();
                 false
             }
+            // A preview: the screen changes colour and nothing else.
+            //
+            // Not `set_theme`, because that marks the config dirty and a look is not
+            // a decision — quitting from inside the picker would then save a theme the
+            // user only ever moved the highlight over. And the settings screen's
+            // `current_theme` is left alone too, because that field is what the
+            // picker restores to on escape; writing the preview into it would mean
+            // cancel keeps the last preview.
+            Effect::PreviewTheme(theme) => {
+                self.config.theme = theme;
+                false
+            }
             Effect::SetApeKey(key) => {
                 self.config.ape_key = key;
                 self.dirty = true;
@@ -2300,14 +2312,35 @@ mod tests {
             Config::default().theme,
             crate::config::theme::ThemeName::Auto
         );
+        // `auto` is the terminal's own colours and nothing else. It used to be the
+        // monkeytype theme whenever the terminal would not say what its colours were,
+        // which made `auto` and `monkeytype` the same setting on exactly the
+        // terminals where `auto` was meant to be different — and said nothing about
+        // it. `Color::Reset` is "whatever your terminal uses", so this holds whether
+        // the query answered or not.
         let app = app();
         assert_eq!(
             app.theme().background,
-            crate::config::theme::ThemeName::Monkeytype
-                .resolve()
-                .background,
-            "an unknown terminal gets a dark theme"
+            ratatui::style::Color::Reset,
+            "auto did not defer to the terminal's own background"
         );
+        assert_eq!(app.theme().foreground, ratatui::style::Color::Reset);
+        assert_eq!(app.theme().surface, ratatui::style::Color::Reset);
+    }
+
+    /// And `auto` is not any bundled theme, whichever way it is asked. It used to be
+    /// the monkeytype one, which is the whole complaint.
+    #[test]
+    fn auto_is_not_one_of_the_bundled_themes() {
+        let auto = app().theme();
+        for bundled in crate::config::theme::ThemeName::ALL {
+            let other = bundled.resolve();
+            assert_ne!(
+                auto, other,
+                "auto resolved to the {bundled:?} theme, which is a bundled palette \
+                 and not the terminal's"
+            );
+        }
     }
 
     #[test]
