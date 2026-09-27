@@ -51,7 +51,7 @@ pub struct TypingRows {
     pub words: Rect,
     pub chart: Rect,
     pub counters: Rect,
-    /// The row under the counters, for the hint that says which key starts a test.
+    /// The row above the counters, for the hint that says which key starts a test.
     ///
     /// Empty when the screen is too short to spare one, in which case the hint is
     /// drawn over the words instead. See [`rows_for`].
@@ -84,12 +84,12 @@ pub struct TypingRows {
 /// that are both "where the state of the test is", and the mismatch reads as an
 /// accident rather than a decision.
 ///
-/// The hint gets a row of its own, under the counters, **only if the words can spare
-/// one**. That is the whole negotiation: on a roomy screen the hint is a quiet line
-/// below the frame, where nothing is in the way of the words; on a cramped one it
-/// falls back to being drawn over the words, because the words are the test and the
-/// hint is a courtesy. A terminal too short for both is not a terminal where the
-/// words can be quietly deleted to make room for a sentence.
+/// The hint gets a row of its own, immediately **above** the counters, and only if
+/// the words can spare one. That is the whole negotiation: on a roomy screen the hint
+/// is a quiet line between the words and the numbers, where nothing is in the way;
+/// on a cramped one it falls back to being drawn over the words, because the words
+/// are the test and the hint is a courtesy. A terminal too short for both is not a
+/// terminal where the words can be quietly deleted to make room for a sentence.
 pub fn rows_for(area: Rect, bar_rows: u16, hint: bool) -> TypingRows {
     let bottom = area.y + area.height;
 
@@ -102,7 +102,10 @@ pub fn rows_for(area: Rect, bar_rows: u16, hint: bool) -> TypingRows {
     );
     let cursor = area.y + header.height + bar.height;
 
-    // Two rules and the line between them, and never more than the screen has.
+    // Two rules and the line between them, and never more than the screen has. The
+    // counters are the last thing on the screen whatever else happens, because they
+    // are where the test's numbers live and the eye goes to them at the end of a
+    // line.
     let counters_height = COUNTER_ROWS.min(area.height);
     // What is left between the bar and the counters, which is what the hint and the
     // words have between them.
@@ -111,19 +114,23 @@ pub fn rows_for(area: Rect, bar_rows: u16, hint: bool) -> TypingRows {
         .saturating_sub(counters_height);
     let hint_rows = if hint && free > MIN_WORD_ROWS { 1 } else { 0 };
 
-    let hint = Rect::new(
-        area.x,
-        bottom.saturating_sub(hint_rows),
-        area.width,
-        hint_rows,
-    );
     let counters = Rect::new(
         area.x,
-        bottom
-            .saturating_sub(hint_rows)
-            .saturating_sub(counters_height),
+        bottom.saturating_sub(counters_height),
         area.width,
         counters_height,
+    );
+    // The hint sits immediately *above* the counters, not below them.
+    //
+    // It is a note about the keyboard, and the numbers are the test's own state;
+    // a note belongs above the thing it is a note *for*, and the bottom row of a
+    // screen is the one the eye finishes on. It is also where the words end, so
+    // putting it directly above the box keeps it clear of both.
+    let hint = Rect::new(
+        area.x,
+        counters.y.saturating_sub(hint_rows),
+        area.width,
+        hint_rows,
     );
     let free = free.saturating_sub(hint_rows);
 
@@ -174,9 +181,9 @@ impl Screen for Typing {
         let below = render_words(app, frame, rows.words, theme);
         if awaiting {
             if rows.hint.height > 0 {
-                // Its own row, under the counters: the hint is a sentence about the
-                // keyboard, and the words are a sentence to be typed, and the
-                // keyboard hint does not belong among the words.
+                // Its own row, between the words and the numbers: the hint is a note
+                // about the keyboard, and the numbers are the test's own state, and a
+                // note belongs above the thing it is a note for.
                 render_awaiting_key(app, frame, rows.hint, rows.hint.y, theme);
             } else {
                 // No room for a row, so it goes over the words as it always did.

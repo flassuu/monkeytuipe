@@ -1163,40 +1163,45 @@ fn the_hint_survives_a_terminal_with_no_room_for_a_row() {
     }
 }
 
-/// The hint is a row of its own, under the counters box.
+/// The hint is a row of its own, immediately above the counters box.
 ///
 /// It used to sit on the row below the words, which put a sentence about the keyboard
-/// directly under a sentence to be typed — the two are about different things, and
-/// the second is the test. Under the frame it is quiet: the words, then the numbers,
-/// then the hint, in that order of importance.
+/// directly under a sentence to be typed — the two are about different things and the
+/// second is the test. Between the words and the numbers it is quiet and in order:
+/// words, hint, numbers.
 #[test]
-fn the_hint_has_its_own_row_under_the_counters() {
+fn the_hint_has_its_own_row_above_the_counters() {
     let app = in_mode(monkeytuipe::config::Mode::Time);
     let buffer = render(&app, 100, 20);
     let rows = layout_of(&app, &buffer);
 
     assert_eq!(rows.hint.height, 1, "the hint has no row of its own");
     assert_eq!(
-        rows.hint.y,
-        rows.counters.y + rows.counters.height,
-        "the hint is not directly under the counters"
-    );
-    // And the counters are above it, not below: the hint is the last thing on screen.
-    assert_eq!(
         rows.hint.y + rows.hint.height,
+        rows.counters.y,
+        "the hint is not directly above the counters"
+    );
+    // The counters are the last thing on the screen: the bottom row is where the eye
+    // finishes, and it belongs to the test's own numbers.
+    assert_eq!(
+        rows.counters.y + rows.counters.height,
         buffer.area.y + buffer.area.height,
-        "something is under the hint"
+        "the counters are not at the bottom"
     );
     // The words do not reach it.
     assert!(
-        rows.words.y + rows.words.height <= rows.counters.y,
-        "the words and the counters overlap"
+        rows.words.y + rows.words.height <= rows.hint.y,
+        "the words run into the hint"
     );
 
     let on_screen: Vec<String> = lines(&buffer);
     assert!(
         on_screen[rows.hint.y as usize].contains("press shift+enter"),
         "the hint is not on its own row: {on_screen:?}"
+    );
+    assert!(
+        on_screen[rows.counters.y as usize + 1].contains("wpm"),
+        "the numbers are not in the box: {on_screen:?}"
     );
 }
 
