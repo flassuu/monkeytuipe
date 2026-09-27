@@ -58,6 +58,13 @@ pub enum Action {
     NextTheme,
     /// Set the theme by name.
     Theme(&'static str),
+    /// Step the interface language.
+    ///
+    /// Not on the website, which has no interface language at all — every string
+    /// on it is a hardcoded English literal. It is a command because switching
+    /// language is something you do *while* reading the interface, not after
+    /// finding your way to a settings row.
+    Language(i8),
     /// Leave the app.
     Quit,
     /// Copy a line describing the test to the clipboard, if there is one.
@@ -160,6 +167,18 @@ pub const COMMANDS: &[Command] = &[
         display: "language",
         aliases: &["lang", "word list", "words"],
         action: Action::Languages,
+    },
+    Command {
+        display: "russian",
+        // `русский` as well, because a Russian speaker typing into a command list
+        // writes the word they know rather than transliterating it.
+        aliases: &["language", "interface language", "русский"],
+        action: Action::Language(1),
+    },
+    Command {
+        display: "english",
+        aliases: &["language", "interface language", "язык"],
+        action: Action::Language(-1),
     },
     Command {
         display: "settings",
@@ -523,6 +542,39 @@ mod tests {
                 "{} is listed twice",
                 command.display
             );
+        }
+    }
+
+    /// The language commands step in opposite directions, and both exist — a
+    /// command list where the only way to change a setting is to go the wrong way
+    /// is a list that made the change harder.
+    #[test]
+    fn the_language_commands_step_in_opposite_directions() {
+        let russian = COMMANDS
+            .iter()
+            .find(|c| c.display == "russian")
+            .expect("a russian command");
+        let english = COMMANDS
+            .iter()
+            .find(|c| c.display == "english")
+            .expect("an english command");
+        assert_eq!(russian.action, Action::Language(1));
+        assert_eq!(english.action, Action::Language(-1));
+    }
+
+    /// And they name languages that exist, or they set one that does not.
+    #[test]
+    fn the_language_commands_name_real_languages() {
+        for command in COMMANDS {
+            if let Action::Language(_) = command.action {
+                assert!(
+                    crate::i18n::Lang::ALL
+                        .iter()
+                        .any(|lang| lang.name() == command.display),
+                    "{} is not a language this app has",
+                    command.display
+                );
+            }
         }
     }
 

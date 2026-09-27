@@ -106,6 +106,12 @@ pub enum Row {
     SubmitResults,
     /// A passage the user typed, so it is not one of the bar's short choices.
     CustomText,
+    /// The language the *interface* speaks, which is not the word list above.
+    ///
+    /// Its own row because the website has no such setting — every string on it is
+    /// hardcoded English — so there is nothing to confuse it with there, and
+    /// because a setting with no row is a setting nobody can find.
+    InterfaceLanguage,
     /// Held by the settings bar, not by this screen. The variants exist because
     /// the bar's fields are rows too, and one enum is one place to check that a
     /// setting is not shown twice.

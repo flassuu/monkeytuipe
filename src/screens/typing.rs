@@ -128,7 +128,7 @@ impl Screen for Typing {
         let awaiting = !app.test().is_started();
         let below = render_words(app, frame, rows.words, theme);
         if awaiting {
-            render_awaiting_key(frame, rows.words, below, theme);
+            render_awaiting_key(app, frame, rows.words, below, theme);
         }
         render_chart(app, frame, rows.chart, theme);
         render_counters(app, frame, rows.counters, theme);
@@ -175,7 +175,7 @@ pub fn bar_rows(app: &App, width: u16) -> u16 {
     if width == 0 {
         return 0;
     }
-    u16::from(topbar::fits(app, width))
+    app.bar().rows(width)
 }
 
 /// The name on the left, whatever is downloading on the right.
@@ -474,7 +474,11 @@ fn active_word(word: &Word, theme: Theme, zen: bool) -> Vec<Span<'static>> {
 /// Shown only before the test starts. Once there is input there is no question to
 /// answer, and an overlay over a test in progress is a thing in the way of the one
 /// thing the screen is for.
-fn render_awaiting_key(frame: &mut Frame, area: Rect, below: u16, theme: Theme) {
+///
+/// It says *press any key* rather than "click here", because there is no click —
+/// and *any* key, because that is true: every printable key starts the test, and
+/// so does a space, which is what someone who has read the words will press first.
+fn render_awaiting_key(app: &App, frame: &mut Frame, area: Rect, below: u16, theme: Theme) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -486,20 +490,12 @@ fn render_awaiting_key(frame: &mut Frame, area: Rect, below: u16, theme: Theme) 
     };
     let at = Rect::new(area.x, line, area.width, 1);
     frame.render_widget(
-        Paragraph::new(HINT)
+        Paragraph::new(app.tr(crate::i18n::Key::PressAnyKey))
             .style(Style::default().fg(theme.muted))
             .alignment(Alignment::Center),
         at,
     );
 }
-
-/// What the overlay says.
-///
-/// "press any key" rather than "click here": there is no click. And it says
-/// *any* key because that is true — every printable key starts the test, and so
-/// does a space, which is what a user who has read the words and wants to begin
-/// will press first.
-const HINT: &str = "press any key to start typing";
 
 /// The live chart, centred and capped in width.
 fn render_chart(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
@@ -521,15 +517,18 @@ fn render_counters(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
     // Before the test starts the line under the words already says to type, so
     // saying it here too would be the same sentence twice on one screen.
     let hint = if app.test().is_started() {
-        "tab skip · ctrl+r restart · esc commands · f2 settings"
+        app.tr(crate::i18n::Key::StartedHints)
     } else {
-        "esc commands · ctrl+c quit"
+        app.tr(crate::i18n::Key::WaitingHints)
     };
     let mut spans = Vec::new();
     for (label, value) in [
-        ("wpm", format!("{:.0}", app.wpm())),
-        ("acc", format!("{:.0}%", app.accuracy())),
-        ("time", app.countdown()),
+        (app.tr(crate::i18n::Key::Wpm), format!("{:.0}", app.wpm())),
+        (
+            app.tr(crate::i18n::Key::Acc),
+            format!("{:.0}%", app.accuracy()),
+        ),
+        (app.tr(crate::i18n::Key::Time), app.countdown()),
     ] {
         spans.push(Span::styled(format!("{label} "), theme.chrome()));
         spans.push(Span::styled(value, theme.value()));

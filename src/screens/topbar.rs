@@ -66,7 +66,14 @@ impl Block {
 /// One button in a card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Button {
-    pub label: &'static str,
+    /// The label as the interface shows it, already translated.
+    ///
+    /// An owned string rather than a key, because the bar is built from the config
+    /// and the config does not know the interface's language — the app does, and it
+    /// hands the finished label in. Storing a key here instead would mean every
+    /// button needed the app to draw itself, which is the coupling the build-time
+    /// split is there to avoid.
+    pub label: String,
     /// What it changes.
     pub field: Field,
     pub active: bool,
@@ -207,8 +214,12 @@ pub struct BarState<'a> {
     pub words: u32,
     /// Whether a custom passage is set, for the `change` button.
     pub has_custom_text: bool,
-    /// The language, shown nowhere on the bar but kept so a caller can ask.
+    /// The word list. Shown nowhere on the bar — the website's bar has no language
+    /// control either — but the settings screen asks the same struct, so it is here
+    /// rather than passed twice.
     pub language: &'a str,
+    /// The interface language, which is what the labels are in.
+    pub ui_language: crate::i18n::Lang,
 }
 
 impl Bar {
@@ -224,13 +235,13 @@ impl Bar {
         if state.mode != ConfigMode::Zen {
             let disabled = state.mode == ConfigMode::Quote;
             left.push(Button {
-                label: "punctuation",
+                label: tr(state.ui_language, crate::i18n::Key::Punctuation),
                 field: Field::Punctuation,
                 active: state.punctuation,
                 disabled,
             });
             left.push(Button {
-                label: "numbers",
+                label: tr(state.ui_language, crate::i18n::Key::Numbers),
                 field: Field::Numbers,
                 active: state.numbers,
                 disabled,
@@ -241,7 +252,7 @@ impl Bar {
             ConfigMode::Time => {
                 for seconds in bar::TIMES {
                     right.push(Button {
-                        label: leak_label(seconds),
+                        label: seconds.to_string(),
                         field: Field::Time,
                         active: state.time == seconds,
                         disabled: false,
@@ -251,7 +262,7 @@ impl Bar {
                 // presets, which is how the site shows that a custom duration is
                 // in effect.
                 right.push(Button {
-                    label: "custom",
+                    label: tr(state.ui_language, crate::i18n::Key::Other),
                     field: Field::TimeCustom,
                     active: !bar::TIMES.contains(&state.time),
                     disabled: false,
@@ -260,14 +271,14 @@ impl Bar {
             ConfigMode::Words => {
                 for words in bar::WORD_COUNTS {
                     right.push(Button {
-                        label: leak_label(words),
+                        label: words.to_string(),
                         field: Field::Words,
                         active: state.words == words,
                         disabled: false,
                     });
                 }
                 right.push(Button {
-                    label: "custom",
+                    label: tr(state.ui_language, crate::i18n::Key::Other),
                     field: Field::WordsCustom,
                     active: !bar::WORD_COUNTS.contains(&state.words),
                     disabled: false,
@@ -275,14 +286,14 @@ impl Bar {
             }
             ConfigMode::Quote => {
                 right.push(Button {
-                    label: "all",
+                    label: tr(state.ui_language, crate::i18n::Key::QuoteAll),
                     field: Field::QuoteLength,
                     active: state.quote_length == bar::QuoteLength::All,
                     disabled: false,
                 });
                 for length in bar::QUOTE_LENGTHS.iter().skip(1) {
                     right.push(Button {
-                        label: length.as_str(),
+                        label: tr(state.ui_language, length.key()),
                         field: Field::QuoteLength,
                         active: state.quote_length == *length,
                         disabled: false,
@@ -291,11 +302,14 @@ impl Bar {
             }
             ConfigMode::Custom => {
                 right.push(Button {
-                    label: if state.has_custom_text {
-                        "change"
-                    } else {
-                        "add"
-                    },
+                    label: tr(
+                        state.ui_language,
+                        if state.has_custom_text {
+                            crate::i18n::Key::Change
+                        } else {
+                            crate::i18n::Key::Add
+                        },
+                    ),
                     field: Field::CustomText,
                     active: state.has_custom_text,
                     disabled: false,
@@ -309,7 +323,7 @@ impl Bar {
         let centre = bar::MODES
             .iter()
             .map(|mode| Button {
-                label: mode.bar_label(),
+                label: tr(state.ui_language, mode.key()),
                 field: Field::Mode,
                 active: *mode == state.mode,
                 disabled: false,
@@ -373,7 +387,100 @@ impl Bar {
                 return Some(lines);
             }
         }
-        None
+        // Nothing fits on one row. Two rows is better than no bar: the length card
+        // moves below the modes rather than the whole strip disappearing. This is
+        // what a Russian quote test needs — «все короткие средние длинные толстые»
+        // is nine columns wider than `all short medium long thicc` — and it is also
+        // what a sixty-column English terminal needs.
+        self.render_wrapped(width, theme)
+    }
+
+    /// The two-row form: the modes and the toggles on one row, the length on the
+    /// next.
+    ///
+    /// The modes stay centred on the first row, because that is the part of the
+    /// bar the user is looking at, and the length is right-aligned under the row
+    /// rather than centred — a centred length under a centred mode looks like two
+    /// separate bars.
+    fn render_wrapped(&self, width: u16, theme: Theme) -> Option<Vec<Line<'static>>> {
+        let m = Metrics::COMPACT;
+        let used = |card: &Card| card.width(m.gap, m.pad);
+        // The first row is the toggles and the modes, and must fit on its own.
+        let top = used(&self.left) + used(&self.centre) + m.card_gap;
+        let bottom = used(&self.right);
+        if top > width as usize || bottom > width as usize || width == 0 {
+            return None;
+        }
+        let counts = [
+            self.left.buttons.len(),
+            self.centre.buttons.len(),
+            self.right.buttons.len(),
+        ];
+        let (selected_card, within) = selection_in(&counts, self.selected);
+
+        let centre_at = (width as usize).saturating_sub(used(&self.centre)) / 2;
+        let left_at = centre_at.saturating_sub(m.card_gap + used(&self.left));
+        let mut spans: Vec<Span<'static>> = vec![Span::raw(" ".repeat(left_at))];
+        let mut at = left_at;
+        if !self.left.buttons.is_empty() {
+            let card = render_card(
+                &self.left.buttons,
+                (selected_card == 0).then_some(within),
+                theme,
+                m,
+            );
+            at += card.width();
+            spans.extend(card.spans);
+        }
+        spans.push(Span::raw(" ".repeat(centre_at.saturating_sub(at))));
+        let centre = render_card(
+            &self.centre.buttons,
+            (selected_card == 1).then_some(within),
+            theme,
+            m,
+        );
+        spans.extend(centre.spans);
+        pad_to(&mut spans, width as usize);
+
+        // The length card, right-aligned, on its own row.
+        let right = render_card(
+            &self.right.buttons,
+            (selected_card == 2).then_some(within),
+            theme,
+            m,
+        );
+        let right_at = (width as usize).saturating_sub(right.width());
+        let mut second: Vec<Span<'static>> = vec![Span::raw(" ".repeat(right_at))];
+        second.extend(right.spans);
+        pad_to(&mut second, width as usize);
+
+        Some(vec![Line::from(spans), Line::from(second)])
+    }
+
+    /// The narrowest the two-row form can be drawn.
+    ///
+    /// The first row is the toggles and the modes, the second is the length, so
+    /// each row is its own constraint and the bar needs the wider of the two. In
+    /// practice that is the modes — a five-button card is wider than a length card
+    /// in every language — but it is the wider of the two, not an assumption.
+    pub fn two_row_minimum(&self) -> usize {
+        let m = Metrics::COMPACT;
+        let top = self.left.width(m.gap, m.pad) + self.centre.width(m.gap, m.pad) + m.card_gap;
+        let bottom = self.right.width(m.gap, m.pad);
+        top.max(bottom)
+    }
+
+    /// How many rows the bar takes at this width: one if it fits on one, two if it
+    /// fits on two, and none if it does not fit at all.
+    ///
+    /// Asked by the screen to decide how much room to leave, so the answer and the
+    /// drawing cannot disagree about it.
+    pub fn rows(&self, width: u16) -> u16 {
+        let theme = crate::config::theme::ThemeName::Monkeytype.resolve();
+        match self.render(width, theme) {
+            Some(lines) => u16::try_from(lines.len()).unwrap_or(u16::MAX),
+            None => 0,
+        }
     }
 
     /// The narrowest width at which the bar can still be drawn.
@@ -485,13 +592,23 @@ impl Bar {
             );
             spans.extend(card.spans);
         }
+        let _ = at;
         // Pad out to the full width, so the bar occupies a fixed region instead
         // of one that changes width with its content.
-        let drawn: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        if let Some(rest) = (width as usize).checked_sub(drawn) {
-            spans.push(Span::raw(" ".repeat(rest)));
-        }
+        pad_to(&mut spans, width as usize);
         Some(vec![Line::from(spans)])
+    }
+}
+
+/// Pads a row out to `width` columns.
+///
+/// The bar occupies a fixed region rather than one that changes width with its
+/// content, which is what lets the screen reserve a fixed number of rows and what
+/// stops a trailing space from being dropped somewhere upstream.
+fn pad_to(spans: &mut Vec<Span<'static>>, width: usize) {
+    let drawn: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    if let Some(rest) = width.checked_sub(drawn) {
+        spans.push(Span::raw(" ".repeat(rest)));
     }
 }
 
@@ -561,15 +678,6 @@ fn selection_in(counts: &[usize], selected: usize) -> (usize, usize) {
     (0, 0)
 }
 
-/// A number label that outlives the loop it was made in.
-///
-/// The bar's buttons are `&'static str` so the type is one word smaller, and the
-/// only numbers in it are the presets. Leaking eight numbers is a fine trade for
-/// a `&'static` label, and it is bounded by the size of the lists.
-fn leak_label(value: u32) -> &'static str {
-    Box::leak(value.to_string().into_boxed_str())
-}
-
 /// Renders one card as a bordered, padded line.
 fn render_card(
     buttons: &[Button],
@@ -627,7 +735,15 @@ pub fn button_span(button: &Button, selected: bool, theme: Theme) -> Span<'stati
     } else {
         Style::default().fg(theme.muted)
     };
-    Span::styled(button.label, style)
+    Span::styled(button.label.clone(), style)
+}
+
+/// One interface string.
+///
+/// Every button's label comes through here, so there is exactly one place in this
+/// file where a language is consulted.
+fn tr(lang: crate::i18n::Lang, key: crate::i18n::Key) -> String {
+    lang.tr(key).to_owned()
 }
 
 /// Formats a bar for a test, used by the tests and by anything that wants to
@@ -657,6 +773,7 @@ impl<'a> From<&'a crate::config::Config> for BarState<'a> {
             words: test.words,
             has_custom_text: !test.custom_text.is_empty(),
             language: &test.language,
+            ui_language: config.ui_language,
         }
     }
 }
@@ -693,7 +810,15 @@ mod tests {
     use super::*;
     use crate::config::QuoteLength;
 
+    use crate::i18n::{Key, Lang};
+
     fn state(mode: ConfigMode) -> BarState<'static> {
+        state_in(mode, Lang::English)
+    }
+
+    /// The same, in a given language — which is how a test says "these are the
+    /// English labels" without writing them out.
+    fn state_in(mode: ConfigMode, lang: Lang) -> BarState<'static> {
         BarState {
             mode,
             punctuation: true,
@@ -704,35 +829,124 @@ mod tests {
             words: 25,
             has_custom_text: false,
             language: "english",
+            ui_language: lang,
         }
     }
 
     /// The labels of a block, in order.
-    fn labels(card: &Card) -> Vec<&'static str> {
-        card.buttons.iter().map(|b| b.label).collect()
+    fn labels(card: &Card) -> Vec<String> {
+        card.buttons.iter().map(|b| b.label.clone()).collect()
+    }
+
+    /// One string out of the catalogue, for a test that wants to name a label.
+    fn en(key: Key) -> &'static str {
+        Lang::English.tr(key)
     }
 
     #[test]
     fn the_bar_is_three_cards_with_the_modes_in_the_middle() {
         let bar = Bar::build(state(ConfigMode::Time));
-        assert_eq!(labels(&bar.left), ["punctuation", "numbers"]);
+        assert_eq!(labels(&bar.left), [en(Key::Punctuation), en(Key::Numbers)]);
         assert_eq!(
             labels(&bar.centre),
-            ["time", "words", "quote", "zen", "custom"],
+            [
+                en(Key::ModeTime),
+                en(Key::ModeWords),
+                en(Key::ModeQuote),
+                en(Key::ModeZen),
+                en(Key::ModeCustom),
+            ],
             "the site's order, not an alphabetical one"
         );
-        assert_eq!(labels(&bar.right), ["15", "30", "60", "120", "custom"]);
+        assert_eq!(
+            labels(&bar.right),
+            ["15", "30", "60", "120", en(Key::Other)]
+        );
+    }
+
+    /// The bar is in the interface's language, and it is the *bar* — the first
+    /// thing anyone sees and the thing with the most words on it.
+    #[test]
+    fn the_bar_is_in_the_configured_language() {
+        let bar = Bar::build(state_in(ConfigMode::Time, Lang::Russian));
+        assert_eq!(
+            labels(&bar.left),
+            [
+                Lang::Russian.tr(Key::Punctuation),
+                Lang::Russian.tr(Key::Numbers)
+            ]
+        );
+        assert_eq!(
+            labels(&bar.centre),
+            [
+                Lang::Russian.tr(Key::ModeTime),
+                Lang::Russian.tr(Key::ModeWords),
+                Lang::Russian.tr(Key::ModeQuote),
+                Lang::Russian.tr(Key::ModeZen),
+                Lang::Russian.tr(Key::ModeCustom),
+            ]
+        );
+        assert_eq!(
+            labels(&bar.right),
+            ["15", "30", "60", "120", Lang::Russian.tr(Key::Other)]
+        );
+    }
+
+    /// And it still fits: Russian is longer than English, so a bar that fits in
+    /// one does not automatically fit in the other. A settings bar that only fits
+    /// in English is a settings bar half the users cannot see.
+    #[test]
+    fn a_russian_bar_fits_in_eighty_columns_too() {
+        let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
+        for mode in [
+            ConfigMode::Time,
+            ConfigMode::Words,
+            ConfigMode::Quote,
+            ConfigMode::Zen,
+            ConfigMode::Custom,
+        ] {
+            let bar = Bar::build(state_in(mode, Lang::Russian));
+            assert!(
+                bar.render(80, theme).is_some(),
+                "the {mode:?} bar does not fit in 80 columns in russian"
+            );
+        }
+    }
+
+    /// The word-list language is *not* translated — a list of languages is written
+    /// in the languages it names — so switching the interface language must not
+    /// change the word list's name.
+    #[test]
+    fn switching_the_interface_language_does_not_rename_the_word_list() {
+        // The word list's name is not in the catalogue at all, which is the point:
+        // a list of languages is written in the languages it names. The bar's
+        // *labels* change and the word list does not.
+        let english: String =
+            labels(&Bar::build(state_in(ConfigMode::Time, Lang::English)).left).concat();
+        let russian: String =
+            labels(&Bar::build(state_in(ConfigMode::Time, Lang::Russian)).left).concat();
+        assert_ne!(english, russian, "the labels did not change language");
+        assert!(!english.contains("russian"), "{english}");
     }
 
     #[test]
     fn each_mode_puts_its_own_length_on_the_right() {
         let cases = [
-            (ConfigMode::Words, vec!["10", "25", "50", "100", "custom"]),
+            (
+                ConfigMode::Words,
+                vec!["10", "25", "50", "100", en(Key::Other)],
+            ),
             (
                 ConfigMode::Quote,
-                vec!["all", "short", "medium", "long", "thicc"],
+                vec![
+                    en(Key::QuoteAll),
+                    en(Key::QuoteShort),
+                    en(Key::QuoteMedium),
+                    en(Key::QuoteLong),
+                    en(Key::QuoteThicc),
+                ],
             ),
-            (ConfigMode::Custom, vec!["add"]),
+            (ConfigMode::Custom, vec![en(Key::Add)]),
             (ConfigMode::Zen, vec![]),
         ];
         for (mode, expected) in cases {
@@ -768,7 +982,7 @@ mod tests {
             .buttons
             .iter()
             .filter(|b| b.active)
-            .map(|b| b.label)
+            .map(|b| b.label.as_str())
             .collect();
         assert_eq!(active, ["30"]);
     }
@@ -785,9 +999,9 @@ mod tests {
             .buttons
             .iter()
             .filter(|b| b.active)
-            .map(|b| b.label)
+            .map(|b| b.label.as_str())
             .collect();
-        assert_eq!(active, ["custom"], "42 seconds is a custom duration");
+        assert_eq!(active, [en(Key::Other)], "42 seconds is a custom duration");
     }
 
     #[test]
@@ -838,7 +1052,7 @@ mod tests {
     fn button(active: bool, selected: bool) -> ratatui::text::Span<'static> {
         button_span(
             &Button {
-                label: "punctuation",
+                label: "punctuation".to_owned(),
                 field: Field::Punctuation,
                 active,
                 disabled: false,
@@ -901,7 +1115,7 @@ mod tests {
         let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
         let style = button_span(
             &Button {
-                label: "punctuation",
+                label: "punctuation".to_owned(),
                 field: Field::Punctuation,
                 active: true,
                 disabled: true,
@@ -915,17 +1129,94 @@ mod tests {
     }
 
     /// A bar that cannot be laid out is not drawn half. A truncated card looks
-    /// like a card with a missing button.
+    /// like a card with a missing button, and a card with a button missing is worse
+    /// than a bar on two rows.
     #[test]
-    fn a_bar_too_narrow_is_not_drawn_at_all() {
-        let bar = Bar::build(state(ConfigMode::Time));
+    fn a_bar_too_narrow_for_either_form_is_not_drawn_at_all() {
         let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
-        assert!(bar.render(200, theme).is_some());
-        for width in 0..60u16 {
-            assert!(
-                bar.render(width, theme).is_none(),
-                "a {width}-column bar was drawn truncated"
-            );
+        for mode in [ConfigMode::Time, ConfigMode::Quote, ConfigMode::Zen] {
+            for lang in [Lang::English, Lang::Russian] {
+                let bar = Bar::build(state_in(mode, lang));
+                // Not one column under the two-row form's own minimum.
+                for width in 0..bar.two_row_minimum() as u16 {
+                    assert!(
+                        bar.render(width, theme).is_none(),
+                        "the {mode:?} bar in {lang:?} was drawn truncated at {width} columns"
+                    );
+                }
+                // And at its minimum it draws, on two rows.
+                assert_eq!(
+                    bar.rows(bar.two_row_minimum() as u16),
+                    2,
+                    "{mode:?} in {lang:?} did not draw at its two-row minimum"
+                );
+            }
+        }
+    }
+
+    /// Two rows is the last form before giving up, and it is what a language with
+    /// longer words needs: «все короткие средние длинные толстые» is nine columns
+    /// wider than `all short medium long thicc`, which is the difference between
+    /// having a bar and not having one.
+    #[test]
+    fn a_bar_that_does_not_fit_on_one_row_moves_the_length_below() {
+        let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
+        let russian = Bar::build(state_in(ConfigMode::Quote, Lang::Russian));
+        let lines = russian
+            .render(80, theme)
+            .expect("the bar fits in eighty columns, on one row or two");
+        assert_eq!(
+            lines.len(),
+            2,
+            "the length card did not move to its own row"
+        );
+        assert_eq!(
+            lines.len(),
+            2,
+            "the length card did not move to its own row"
+        );
+        let first: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let second: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            first.contains("дзен"),
+            "the modes are not on the first row: {first}"
+        );
+        assert!(
+            !first.contains("толстые"),
+            "the length did not move: {first}"
+        );
+        assert!(
+            second.contains("толстые"),
+            "the length is not on the second row: {second}"
+        );
+        // And the modes stay centred, because that is the part being looked at.
+        let at = first.find("дзен").expect("the modes");
+        assert!(
+            at > 20,
+            "the modes are not centred on the first row: {at} in {first}"
+        );
+    }
+
+    /// The number of rows the screen reserves is the number of rows the bar draws,
+    /// asked of the same code.
+    #[test]
+    fn the_reserved_rows_match_the_drawn_rows() {
+        let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
+        for (mode, lang) in [
+            (ConfigMode::Time, Lang::English),
+            (ConfigMode::Quote, Lang::English),
+            (ConfigMode::Quote, Lang::Russian),
+            (ConfigMode::Time, Lang::Russian),
+        ] {
+            let bar = Bar::build(state_in(mode, lang));
+            for width in [40u16, 60, 70, 76, 80, 92, 200] {
+                let drawn = bar.render(width, theme).map_or(0, |l| l.len() as u16);
+                assert_eq!(
+                    bar.rows(width),
+                    drawn,
+                    "{mode:?} in {lang:?} at {width} columns: reserved and drew differently"
+                );
+            }
         }
     }
 
@@ -986,16 +1277,22 @@ mod tests {
         );
     }
 
-    /// Below the narrowest the bar is not drawn at all rather than drawn clipped.
+    /// Centring the mode card costs more than the sum of the widths, so there is a
+    /// width at which the bar is drawn on one row and one column less at which it
+    /// is drawn on two. Neither is "not drawn" — only the two-row form failing is.
     #[test]
-    fn the_bar_is_drawn_exactly_when_it_fits_and_not_one_column_short() {
+    fn one_column_less_moves_the_bar_to_two_rows_rather_than_away() {
         let bar = Bar::build(state(ConfigMode::Quote));
-        let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
         let narrowest = bar.narrowest().min(bar.packed_width()) as u16;
-        assert!(bar.render(narrowest, theme).is_some());
-        assert!(
-            bar.render(narrowest - 1, theme).is_none(),
-            "a bar was drawn in less space than it needs"
+        assert_eq!(
+            bar.rows(narrowest),
+            1,
+            "it fits on one row at its own width"
+        );
+        assert_eq!(
+            bar.rows(narrowest - 1),
+            2,
+            "one column less and it moved a row"
         );
     }
 

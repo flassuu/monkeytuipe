@@ -9,7 +9,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 
 use crate::action::Action;
 use crate::api;
-use crate::config::bar::{self, on_off, step, Field, LengthUnit};
+use crate::config::bar::{self, step, Field, LengthUnit};
 use crate::config::theme::Theme;
 use crate::config::Config;
 use crate::engine::{Mode, Test};
@@ -294,7 +294,7 @@ impl App {
     pub fn refresh_account(&mut self) {
         self.rebuild_client();
         let Some(client) = self.api.clone() else {
-            self.account_note = Some("no ApeKey set — reads need one".to_owned());
+            self.account_note = Some(self.tr(crate::i18n::Key::NoApeKeySet).to_owned());
             return;
         };
         let mode = self.config.test.mode;
@@ -502,7 +502,7 @@ impl App {
             // No text at all. An empty test would finish instantly and report a
             // result of nothing, so the fallback is a word the typist has to
             // delete, which is visible.
-            return vec!["custom text is empty".to_owned()];
+            return vec![self.tr(crate::i18n::Key::EmptyCustomText).to_owned()];
         };
         let words: Vec<String> = passage
             .split(' ')
@@ -510,7 +510,7 @@ impl App {
             .map(str::to_owned)
             .collect();
         if words.is_empty() {
-            return vec!["custom text is empty".to_owned()];
+            return vec![self.tr(crate::i18n::Key::EmptyCustomText).to_owned()];
         }
         words
     }
@@ -518,7 +518,7 @@ impl App {
     /// The quote a quote test types.
     fn quote_words(&self) -> Vec<String> {
         let Some(list) = &self.quotes else {
-            return vec!["quotes are still downloading".to_owned()];
+            return vec![self.tr(crate::i18n::Key::NoQuotesDownloaded).to_owned()];
         };
         let length = self.config.test.quote_length;
         match list.pick(length) {
@@ -536,16 +536,19 @@ impl App {
                     .counts()
                     .into_iter()
                     .filter(|(bucket, count)| *bucket != length && *count > 0)
-                    .map(|(bucket, _)| bucket.as_str())
+                    .map(|(bucket, _)| self.tr(bucket.key()))
                     .collect::<Vec<_>>()
                     .join(", ");
+                let length_label = self.tr(length.key());
                 if missing.is_empty() {
-                    vec![format!("no quotes for {} in this language", list.language)]
+                    vec![crate::i18n::fill_all(
+                        self.tr(crate::i18n::Key::NoQuotesAtAll),
+                        &[("length", length_label), ("language", &list.language)],
+                    )]
                 } else {
-                    vec![format!(
-                        "no {} quotes; this language has {}",
-                        length.as_str(),
-                        missing
+                    vec![crate::i18n::fill_all(
+                        self.tr(crate::i18n::Key::NoQuotesThatLong),
+                        &[("length", length_label), ("have", &missing)],
                     )]
                 }
             }
@@ -697,15 +700,15 @@ impl App {
     /// command and a character at the same time, and every bug that produces
     /// comes from that state existing.
     pub fn open_input(&mut self, reason: input::Reason) {
-        self.input = Some(input::Window::new(reason));
-        self.mode = Focus::Input;
+        self.open_input_with(reason, "");
     }
 
     /// Opens the one input window with something already in it, which is what
     /// editing an existing value does — the window is opened *on* the value, not
     /// on an empty field the user has to retype.
     pub fn open_input_with(&mut self, reason: input::Reason, text: impl Into<String>) {
-        self.input = Some(input::Window::prefilled(reason, text));
+        self.input =
+            Some(input::Window::prefilled(reason, text).in_language(self.config.ui_language));
         self.mode = Focus::Input;
     }
 
@@ -773,6 +776,9 @@ impl App {
             }
             Cmd::CustomText => {
                 self.open_input_with(input::Reason::Text, self.config.test.custom_text.join("\n"));
+            }
+            Cmd::Language(by) => {
+                self.adjust_by(Row::InterfaceLanguage, by);
             }
             Cmd::NextTheme => {
                 self.config.theme = self.config.theme.next();
@@ -868,12 +874,12 @@ impl App {
     pub fn bar_value(&self, field: Field) -> String {
         let test = &self.config.test;
         match field {
-            Field::Punctuation => on_off(test.punctuation),
-            Field::Numbers => on_off(test.numbers),
-            Field::Mode => test.mode.bar_label().to_owned(),
+            Field::Punctuation => self.on_off(test.punctuation),
+            Field::Numbers => self.on_off(test.numbers),
+            Field::Mode => self.tr(test.mode.key()).to_owned(),
             Field::Time | Field::TimeCustom => LengthUnit::Seconds.render(test.time),
             Field::Words | Field::WordsCustom => LengthUnit::Words.render(test.words),
-            Field::QuoteLength => test.quote_length.as_str().to_owned(),
+            Field::QuoteLength => self.tr(test.quote_length.key()).to_owned(),
             Field::CustomText => match test.custom_text.first() {
                 Some(text) => format!(
                     "{} words",
@@ -1036,6 +1042,39 @@ impl App {
     pub fn set_theme(&mut self, theme: crate::config::theme::ThemeName) {
         self.config.theme = theme;
         self.dirty = true;
+    }
+
+    /// `on` or `off`, in the user's language.
+    ///
+    /// A method rather than the free function in [`bar`] because the two words are
+    /// the only ones here that are translated, and a caller that reached for the
+    /// free function would get English in a Russian interface.
+    fn on_off(&self, on: bool) -> String {
+        self.tr(if on {
+            crate::i18n::Key::On
+        } else {
+            crate::i18n::Key::Off
+        })
+        .to_owned()
+    }
+
+    /// The language the interface speaks.
+    ///
+    /// Read from the config on every call rather than cached: it is a value in a
+    /// struct the app already owns, and a cached copy of something a settings row
+    /// can change is a second source of truth.
+    pub fn lang(&self) -> crate::i18n::Lang {
+        self.config.ui_language
+    }
+
+    /// One interface string, in the user's language.
+    ///
+    /// The only way a screen should ask for a string. The website has no
+    /// translation layer at all — every string on it is a hardcoded English
+    /// literal — so this is a layer of our own, and it is worth having exactly one
+    /// door into it.
+    pub fn tr(&self, key: crate::i18n::Key) -> &'static str {
+        self.lang().tr(key)
     }
 
     /// The display width of every word, for laying the word pane out.
@@ -1608,6 +1647,17 @@ impl App {
                 self.config.test.language = id.clone();
                 self.start_language(id);
             }
+            // The interface language is two values, and it is a list rather than a
+            // toggle, so the arrows step it. `left` steps towards English and
+            // `right` towards the end, which is the direction the arrow points.
+            Row::InterfaceLanguage => {
+                let all = crate::i18n::Lang::ALL;
+                let index = all
+                    .iter()
+                    .position(|lang| *lang == self.config.ui_language)
+                    .unwrap_or(0);
+                self.config.ui_language = all[step(Some(index), isize::from(by), all.len())];
+            }
             Row::Punctuation => self.config.test.punctuation = !self.config.test.punctuation,
             Row::Numbers => self.config.test.numbers = !self.config.test.numbers,
             // The switch is still honoured so an existing config is not ignored —
@@ -1622,7 +1672,7 @@ impl App {
                     .iter()
                     .position(|d| *d == self.config.test.difficulty);
                 self.config.test.difficulty =
-                    bar::DIFFICULTIES[bar::step(current, isize::from(by), bar::DIFFICULTIES.len())];
+                    bar::DIFFICULTIES[step(current, isize::from(by), bar::DIFFICULTIES.len())];
             }
             // Free text and the bar's own fields. A row that has a view is
             // opened by the screen, not stepped here, and the bar's fields are
@@ -2747,7 +2797,7 @@ mod tests {
             .right
             .buttons
             .iter()
-            .find(|b| b.label == "custom")
+            .find(|b| b.label == app.tr(crate::i18n::Key::Other))
             .expect("a wrench");
         assert!(custom.active, "42 seconds did not light the wrench");
     }
@@ -3165,7 +3215,7 @@ mod tests {
                 .right
                 .buttons
                 .iter()
-                .any(|b| b.label == "custom" && b.active),
+                .any(|b| b.label == app.tr(crate::i18n::Key::Other) && b.active),
             "the wrench is not lit for 45 seconds"
         );
     }

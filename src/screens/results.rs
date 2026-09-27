@@ -101,7 +101,12 @@ impl Screen for Results {
             );
         }
         if area.height > below + chart_height + keys_height {
-            render_footer(Rect::new(area.x, footer_y, area.width, 1), theme, frame);
+            render_footer(
+                app,
+                Rect::new(area.x, footer_y, area.width, 1),
+                theme,
+                frame,
+            );
         }
     }
 
@@ -268,9 +273,16 @@ fn render_submit(area: Rect, app: &App, theme: Theme, frame: &mut Frame) {
     let hashed = app
         .submission_body()
         .is_some_and(|b| !b.result.hash.is_empty());
-    let mut text = outcome.message();
-    if !hashed {
-        text.push_str(" (payload not prepared)");
+    // The submission line is a sentence about the app, not about a destination, so
+    // it comes from the catalogue. `Destination::describe` is the destination's
+    // own explanation and stays English, because it names an HTTP endpoint.
+    let mut text = if outcome.was_saved() {
+        String::new()
+    } else {
+        app.tr(crate::i18n::Key::NotSubmitted).to_owned()
+    };
+    if !hashed && text.is_empty() {
+        text = app.tr(crate::i18n::Key::NotSubmitted).to_owned();
     }
     let style = if outcome.was_saved() {
         theme.correct_style()
@@ -285,12 +297,12 @@ fn render_submit(area: Rect, app: &App, theme: Theme, frame: &mut Frame) {
     );
 }
 
-fn render_footer(area: Rect, theme: Theme, frame: &mut Frame) {
+fn render_footer(app: &App, area: Rect, theme: Theme, frame: &mut Frame) {
     // `esc` is the command line, not a back key — the same binding the site has
     // when `quickRestart` is off, which is the default. The way *out* of this
     // screen is a command, so the footer says where the commands are.
     let line = Line::from(Span::styled(
-        " ctrl+r again · esc commands · ctrl+c quit ",
+        format!(" {} ", app.tr(crate::i18n::Key::ResultsHints)),
         theme.chrome(),
     ))
     .alignment(Alignment::Center);
@@ -305,7 +317,14 @@ fn render_footer(area: Rect, theme: Theme, frame: &mut Frame) {
 pub fn account_line(app: &App, theme: Theme) -> Line<'static> {
     if let Some(profile) = app.profile() {
         let streak = if profile.streak > 0 {
-            format!(" · {} day streak", profile.streak)
+            format!(
+                " {}",
+                crate::i18n::fill(
+                    app.tr(crate::i18n::Key::DayStreak),
+                    "days",
+                    &profile.streak.to_string()
+                )
+            )
         } else {
             String::new()
         };
@@ -316,15 +335,22 @@ pub fn account_line(app: &App, theme: Theme) -> Line<'static> {
     }
     match app.account_note() {
         Some(note) => Line::from(vec![
-            Span::styled(" not signed in — ", theme.chrome()),
+            Span::styled(
+                format!(" {} ", app.tr(crate::i18n::Key::NotSignedInDash)),
+                theme.chrome(),
+            ),
             Span::styled(note.to_owned(), theme.chrome()),
         ]),
         None if !app.is_signed_in() => Line::from(Span::styled(
-            " not signed in — set an ApeKey in settings",
+            format!(
+                " {} {}",
+                app.tr(crate::i18n::Key::NotSignedInDash),
+                app.tr(crate::i18n::Key::SetApeKeyInSettings)
+            ),
             theme.chrome(),
         )),
         None => Line::from(Span::styled(
-            " signed in · reading records…",
+            format!(" {}", app.tr(crate::i18n::Key::ReadingRecords)),
             theme.chrome(),
         )),
     }

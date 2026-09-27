@@ -28,7 +28,7 @@ use crate::config::theme::Theme;
 use crate::screens::commands;
 
 /// Why the window is open, which decides what it accepts and what it shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     /// Run a command.
     Command,
@@ -42,27 +42,27 @@ pub enum Reason {
 
 impl Reason {
     /// The heading, which says what is being asked for.
-    pub fn title(&self) -> &'static str {
+    pub fn title(self, lang: crate::i18n::Lang) -> &'static str {
         match self {
-            Self::Command => "commands",
+            Self::Command => lang.tr(crate::i18n::Key::Commands),
             Self::Length(field) => match field {
-                Field::Time | Field::TimeCustom => "duration",
-                _ => "words",
+                Field::Time | Field::TimeCustom => lang.tr(crate::i18n::Key::DurationTitle),
+                _ => lang.tr(crate::i18n::Key::WordsTitle),
             },
-            Self::Text => "custom text",
-            Self::ApeKey => "ape key",
+            Self::Text => lang.tr(crate::i18n::Key::CustomTextTitle),
+            Self::ApeKey => lang.tr(crate::i18n::Key::ApeKeyTitle),
         }
     }
 
     /// A line under the field saying what is accepted.
-    pub fn hint(&self) -> &'static str {
+    pub fn hint(self, lang: crate::i18n::Lang) -> &'static str {
         match self {
-            Self::Command => "type to search · ↑↓ move · enter run · esc close",
+            Self::Command => lang.tr(crate::i18n::Key::CommandHint),
             // Zero is not offered: a word count of zero and a duration of zero
             // both mean an endless test, and endless is what zen is for.
-            Self::Length(_) => "seconds, or 1h30m · h hours m minutes",
-            Self::Text => "one passage per line · the first line is the test",
-            Self::ApeKey => "from monkeytype account settings",
+            Self::Length(_) => lang.tr(crate::i18n::Key::LengthHint),
+            Self::Text => lang.tr(crate::i18n::Key::TextHint),
+            Self::ApeKey => lang.tr(crate::i18n::Key::ApeKeyHint),
         }
     }
 
@@ -92,6 +92,13 @@ enum Kind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
     reason: Reason,
+    /// The interface language, captured when the window opened.
+    ///
+    /// Captured rather than asked for at draw time, because a window that changed
+    /// language under the user mid-edit would leave the label they were typing
+    /// against out of step with the field. Changing it is a settings row, and
+    /// changing it re-opens.
+    lang: crate::i18n::Lang,
     text: String,
     /// Which of the matches is highlighted. Only meaningful for a command window;
     /// a number or a text window has no list to move through.
@@ -101,8 +108,14 @@ pub struct Window {
 impl Window {
     /// Opens a window, empty.
     pub fn new(reason: Reason) -> Self {
+        Self::with_language(reason, crate::i18n::Lang::default())
+    }
+
+    /// Opens a window in a given language.
+    pub fn with_language(reason: Reason, lang: crate::i18n::Lang) -> Self {
         Self {
             reason,
+            lang,
             text: String::new(),
             cursor: 0,
         }
@@ -115,9 +128,25 @@ impl Window {
         window
     }
 
+    /// The same window, in another language.
+    ///
+    /// The reason this exists rather than a setter: a window's language is chosen
+    /// when it opens and does not change while it is open, so the only honest way
+    /// to change it is to make a new one. A setter would be a way to have a label
+    /// in one language and a preview in another.
+    pub fn in_language(mut self, lang: crate::i18n::Lang) -> Self {
+        self.lang = lang;
+        self
+    }
+
     /// Why it is open.
     pub fn reason(&self) -> &Reason {
         &self.reason
+    }
+
+    /// The language the window is in.
+    pub fn lang(&self) -> crate::i18n::Lang {
+        self.lang
     }
 
     /// What has been typed.
@@ -224,6 +253,7 @@ impl Window {
     /// `1h30m` is not obviously five thousand four hundred seconds and the site
     /// shows the same figure.
     pub fn preview(&self) -> Option<String> {
+        let lang = self.lang;
         match self.reason {
             Reason::Length(_) => {
                 let text = self.text.trim();
@@ -231,15 +261,27 @@ impl Window {
                     return None;
                 }
                 Some(match parse_duration(text) {
-                    Some(0) => "0 — endless, which is what zen is for".to_owned(),
-                    Some(seconds) => format!("{seconds} seconds"),
-                    None => format!("{text:?} is not a duration"),
+                    Some(0) => lang.tr(crate::i18n::Key::EndlessPreview).to_owned(),
+                    Some(seconds) => {
+                        format!("{seconds} {}", lang.tr(crate::i18n::Key::Seconds))
+                    }
+                    None => crate::i18n::fill(
+                        lang.tr(crate::i18n::Key::NotADurationPreview),
+                        "text",
+                        text,
+                    ),
                 })
             }
             Reason::ApeKey => None,
             Reason::Text => {
                 let words = self.text.split_whitespace().count();
-                (words > 0).then(|| format!("{words} words"))
+                (words > 0).then(|| {
+                    crate::i18n::fill(
+                        lang.tr(crate::i18n::Key::WordCountPreview),
+                        "words",
+                        &words.to_string(),
+                    )
+                })
             }
             Reason::Command => None,
         }
@@ -266,7 +308,7 @@ impl Window {
             .unwrap_or(20);
         // The hint sits inside the border, so it has to fit too. A clipped hint
         // is worse than none: it looks like the sentence simply ends.
-        let wanted = (longest_label + 4).max(self.reason.hint().chars().count() + 2);
+        let wanted = (longest_label + 4).max(self.reason.hint(self.lang).chars().count() + 2);
         // A margin either side, and never so narrow that nothing can be read.
         let room = available.saturating_sub(4).max(1);
         (wanted as u16).min(room)
@@ -378,7 +420,7 @@ pub fn render(window: &Window, area: Rect, theme: Theme, frame: &mut Frame) {
         area,
         window.width(area.width),
         window.height(),
-        window.reason.title(),
+        window.reason.title(window.lang()),
         theme,
         frame,
     ) else {
@@ -399,7 +441,10 @@ pub fn render(window: &Window, area: Rect, theme: Theme, frame: &mut Frame) {
     }
     // The hint is the last thing, so a long list cannot push it off.
     if (lines.len() as u16) < chrome.inner.height {
-        lines.push(crate::screens::chrome::hint(window.reason.hint(), theme));
+        lines.push(crate::screens::chrome::hint(
+            window.reason.hint(window.lang()),
+            theme,
+        ));
     }
     chrome.draw(lines, frame);
 }
@@ -468,11 +513,63 @@ mod tests {
 
     #[test]
     fn the_window_says_what_it_is_asking_for() {
-        assert_eq!(Reason::Command.title(), "commands");
-        assert_eq!(Reason::Length(Field::Time).title(), "duration");
-        assert_eq!(Reason::Length(Field::Words).title(), "words");
-        assert_eq!(Reason::Text.title(), "custom text");
-        assert_eq!(Reason::ApeKey.title(), "ape key");
+        use crate::i18n::Lang;
+        assert_eq!(Reason::Command.title(Lang::English), "commands");
+        assert_eq!(Reason::Length(Field::Time).title(Lang::English), "duration");
+        assert_eq!(Reason::Length(Field::Words).title(Lang::English), "words");
+        assert_eq!(Reason::Text.title(Lang::English), "custom text");
+        assert_eq!(Reason::ApeKey.title(Lang::English), "ape key");
+    }
+
+    /// The window is in the user's language, not the default one. A dialog in the
+    /// wrong language is worse than no translation at all, because it looks like
+    /// the translation is half done when in fact nothing was translated.
+    #[test]
+    fn the_window_is_in_the_language_it_was_opened_in() {
+        use crate::i18n::Lang;
+        let russian = Window::with_language(Reason::Command, Lang::Russian);
+        assert_eq!(russian.reason().title(russian.lang()), "команды");
+        assert!(russian.preview().is_none());
+        // And the hint, which is the other sentence on screen.
+        let mut russian = Window::with_language(Reason::Text, Lang::Russian);
+        russian.key(K::Char('a'));
+        assert_eq!(
+            russian.reason().hint(russian.lang()),
+            "по абзацу на строку · тест — первая строка"
+        );
+    }
+
+    /// And the preview is in it too, placeholders and all.
+    #[test]
+    fn the_preview_is_translated() {
+        use crate::i18n::Lang;
+        let mut w = Window::with_language(Reason::Length(Field::Time), Lang::Russian);
+        for c in "soon".chars() {
+            w.key(K::Char(c));
+        }
+        assert_eq!(w.preview().as_deref(), Some("soon — это не длительность"));
+        for _ in 0..4 {
+            w.key(K::Backspace);
+        }
+        for c in "0".chars() {
+            w.key(K::Char(c));
+        }
+        assert_eq!(
+            w.preview().as_deref(),
+            Some("0 — бесконечно, для этого есть дзен")
+        );
+    }
+
+    /// A word count reads as a count, not as a sentence with a number glued to the
+    /// front of it.
+    #[test]
+    fn a_word_count_preview_is_translated() {
+        use crate::i18n::Lang;
+        let mut w = Window::with_language(Reason::Text, Lang::Russian);
+        for c in "one two three".chars() {
+            w.key(K::Char(c));
+        }
+        assert_eq!(w.preview().as_deref(), Some("слов: 3"));
     }
 
     #[test]

@@ -30,21 +30,16 @@ use crate::action::Action;
 use crate::app::App;
 use crate::config::bar;
 use crate::config::theme::ThemeName;
+use crate::i18n::Key;
 use crate::screens::{Effect, Row, Screen, ScreenKind};
 use crate::words::variants;
 
-/// The key hints, in one place.
-///
-/// A hint is prose, and prose that does not fit is a sentence that stops in the
-/// middle. It is also the only place the vim keys and the arrows are both
-/// mentioned, so it has to name both.
-const HINT: &str = "←→ or hl change · enter open · ↑↓ or jk move · i commands · esc close";
-
 /// The rows, in display order. `Back` is last so `↑` from the top reaches it.
-pub const ROWS: [Row; 7] = [
+pub const ROWS: [Row; 8] = [
     Row::Theme,
     Row::Difficulty,
     Row::Language,
+    Row::InterfaceLanguage,
     Row::CustomText,
     Row::ApeKey,
     Row::SubmitResults,
@@ -108,7 +103,7 @@ impl Screen for Settings {
         let area = frame.area();
         let width = width_of(app, area.width);
         let height = self.height(area.height);
-        let title = self.title();
+        let title = self.title(app);
         let Some(chrome) = super::chrome::Chrome::place(area, width, height, title, theme, frame)
         else {
             return;
@@ -156,20 +151,15 @@ impl Screen for Settings {
                 // the same question as the ApeKey.
                 lines.push(Line::default());
                 lines.push(super::results::account_line(app, theme));
-                lines.push(super::chrome::hint(HINT, theme));
+                lines.push(super::chrome::hint(app.tr(Key::SettingsHint), theme));
             }
             View::Languages { base, size } => {
                 lines.extend(language_items(app, *base, *size));
             }
-            View::Editor { row, text } => {
-                let (name, _) = row_value(app, *row);
+            View::Editor { text, .. } => {
                 lines.push(super::chrome::field(text, theme));
                 lines.push(Line::default());
-                lines.push(super::chrome::hint(&format!("editing {name}"), theme));
-                lines.push(super::chrome::hint(
-                    "enter saves · esc discards · tab or shift+tab to move the caret",
-                    theme,
-                ));
+                lines.push(super::chrome::hint(app.tr(Key::EditorHelp), theme));
             }
         }
         chrome.draw(lines, frame);
@@ -189,11 +179,13 @@ impl Settings {
     ///
     /// The row being edited, or the language being chosen, or just "settings" —
     /// which is what tells a user which of three things they are looking at.
-    fn title(&self) -> &'static str {
+    fn title(&self, app: &App) -> &'static str {
         match &self.view {
-            View::Rows => "settings",
-            View::Languages { .. } => "language",
-            View::Editor { .. } => "edit",
+            View::Rows => app.tr(Key::Settings),
+            View::Languages { .. } => app.tr(Key::LanguageBrowser),
+            // The row's own name, so the window says which setting is open — the
+            // one thing a window full of text does not tell you.
+            View::Editor { row, .. } => row_value(app, *row).0,
         }
     }
 
@@ -247,7 +239,9 @@ impl Settings {
                     // Theme and difficulty are short ordered lists, so a step is the
                     // right thing to do with left and right — in the direction that
                     // was pressed, which is the whole point of having two arrows.
-                    Row::Theme | Row::Difficulty => vec![Effect::Adjust(row, by)],
+                    Row::Theme | Row::Difficulty | Row::InterfaceLanguage => {
+                        vec![Effect::Adjust(row, by)]
+                    }
                     // The others are not "one step from the last": they are a list or
                     // a sentence, and stepping through a list of two hundred by
                     // pressing right is a way of never choosing one.
@@ -402,10 +396,9 @@ fn width_of(app: &App, available: u16) -> u16 {
         })
         .max()
         .unwrap_or(40) as u16;
-    // The hint is a line of prose and it sets a floor: a window narrower than its
-    // own hint has a truncated hint, and a truncated hint looks like a sentence
-    // that simply stops.
-    let hint: u16 = HINT.chars().count() as u16 + 2;
+    // The hint is prose and it sets a floor: a window narrower than its own hint
+    // has a truncated hint, and a truncated hint looks like a sentence that stops.
+    let hint: u16 = app.tr(Key::SettingsHint).chars().count() as u16 + 2;
     widest.max(hint).min(available.saturating_sub(2).max(20))
 }
 
@@ -413,40 +406,62 @@ fn width_of(app: &App, available: u16) -> u16 {
 fn row_value(app: &App, row: Row) -> (&'static str, String) {
     match row {
         Row::Theme => (
-            "theme",
+            app.tr(Key::Theme),
             match app.config.theme {
                 // `auto` is not a theme, it is a decision, so it says what it
                 // decided rather than what it is.
                 // `auto` is a decision, not a theme, so it says what it decided.
                 ThemeName::Auto => {
-                    format!("auto ({})", ThemeName::auto_for(app.terminal()).label())
+                    format!(
+                        "{} ({})",
+                        app.tr(Key::ThemeAuto),
+                        ThemeName::auto_for(app.terminal()).label()
+                    )
                 }
                 other => other.label().to_owned(),
             },
         ),
-        Row::Difficulty => ("difficulty", app.config.test.difficulty.label().to_owned()),
-        Row::Language => ("language", app.config.test.language.clone()),
+        Row::Difficulty => (
+            app.tr(Key::Difficulty),
+            app.tr(app.config.test.difficulty.key()).to_owned(),
+        ),
+        Row::Language => (app.tr(Key::Language), app.config.test.language.clone()),
+        Row::InterfaceLanguage => (
+            app.tr(Key::InterfaceLanguage),
+            // A language names *itself* in its own script. A picker that shows
+            // "English" to someone looking for English and "Английский" to someone
+            // looking for русский is the wrong way round: the one thing a user
+            // cannot read is the one thing they most need to find.
+            app.config.ui_language.self_name().to_owned(),
+        ),
         Row::CustomText => (
-            "custom text",
+            app.tr(Key::CustomTextTitle),
             match app.config.test.custom_text.first() {
                 Some(text) => {
                     let words = text.split(' ').filter(|w| !w.is_empty()).count();
                     let lines = app.config.test.custom_text.len();
                     format!("{words} words{}", extra_lines(lines))
                 }
-                None => "not set".to_owned(),
+                None => app.tr(Key::NotSet).to_owned(),
             },
         ),
         Row::ApeKey => (
-            "ape key",
+            app.tr(Key::ApeKeyTitle),
             match app.config.resolved_ape_key() {
-                Some(key) if key.len() > 8 => format!("set · {}…", &key[..8]),
-                Some(_) => "set".to_owned(),
-                None => "not set".to_owned(),
+                Some(key) if key.len() > 8 => {
+                    format!("{} · {}…", app.tr(Key::ApeKeySet), &key[..8])
+                }
+                Some(_) => app.tr(Key::ApeKeySet).to_owned(),
+                None => app.tr(Key::NotSet).to_owned(),
             },
         ),
-        Row::SubmitResults => ("submit results", "not possible — see below".to_owned()),
-        Row::Back => ("back to typing", String::new()),
+        Row::SubmitResults => (
+            app.tr(Key::SubmitResults),
+            app.tr(Key::SubmissionImpossible).to_owned(),
+        ),
+        Row::Back => (app.tr(Key::BackToTyping), String::new()),
+        // The rows the bar owns, which this screen deliberately does not show. They
+        // still need a name for the test that checks none of them is here.
         _ => (row_label(row), String::new()),
     }
 }
@@ -462,6 +477,7 @@ fn extra_lines(lines: usize) -> String {
 fn row_label(row: Row) -> &'static str {
     match row {
         Row::Theme => "theme",
+        Row::InterfaceLanguage => "interface language",
         Row::Language => "language",
         Row::CustomText => "custom text",
         Row::ApeKey => "ape key",
@@ -488,10 +504,10 @@ fn language_items(app: &App, selected_base: usize, selected_size: usize) -> Vec<
     let mut lines: Vec<Line> = Vec::new();
 
     // The header row: the sizes, in the order the bar cycles them.
-    let mut header = vec![Span::raw(format!("{:<20}", "language"))];
+    let mut header = vec![Span::raw(format!("{:<20}", app.tr(Key::Language)))];
     for size in &bar::variants_sizes {
         header.push(Span::styled(
-            format!(" {:>5}", size_label(*size)),
+            format!(" {:>5}", size_label(*size, app)),
             Style::default().fg(theme.muted),
         ));
     }
@@ -544,9 +560,15 @@ fn language_items(app: &App, selected_base: usize, selected_size: usize) -> Vec<
     lines
 }
 
-fn size_label(size: u32) -> String {
+/// The column header for a word-list size: `base` for the plain list, `5k` for
+/// the short one.
+///
+/// "base" is the site's word for the list with no size suffix, and the *base* of
+/// the language rather than a size of it — which is why it is translated and the
+/// numbers are not.
+fn size_label(size: u32, app: &App) -> String {
     if size == 0 {
-        "base".to_owned()
+        app.tr(Key::BaseColumn).to_owned()
     } else {
         format!("{size}k")
     }
@@ -613,7 +635,7 @@ mod tests {
     fn value_of(app: &App, row: Row) -> String {
         match row {
             Row::Theme => app.config.theme.label().to_owned(),
-            Row::Difficulty => app.config.test.difficulty.label().to_owned(),
+            Row::Difficulty => app.tr(app.config.test.difficulty.key()).to_owned(),
             other => panic!("{other:?} is not a value a direction applies to"),
         }
     }

@@ -1094,3 +1094,197 @@ fn the_hint_survives_a_terminal_with_no_room_for_a_row() {
         );
     }
 }
+
+// ---- the interface language --------------------------------------------
+
+/// An app in a given interface language.
+fn in_language(lang: monkeytuipe::i18n::Lang) -> App {
+    let config = Config {
+        ui_language: lang,
+        ..Config::default()
+    };
+    let mut app = App::new(config, PathBuf::from("/nonexistent/config.toml"));
+    app.set_words(
+        "the child become possible point face back the here however not still any"
+            .split(' ')
+            .map(str::to_owned)
+            .collect(),
+    );
+    app
+}
+
+/// The website has no interface language at all — every string on it is a hardcoded
+/// English literal — so this is a layer of our own. The thing it has to get right
+/// is that a language which is not the default is a *language*, not a few strings
+/// with the rest left in English.
+#[test]
+fn russian_is_actually_russian_on_the_typing_screen() {
+    use monkeytuipe::i18n::Lang;
+    let text = lines(&render(&in_language(Lang::Russian), 92, 24)).join("\n");
+    for said in [
+        "пунктуация", // punctuation
+        "время",      // time
+        "слова",      // words
+        "дзен",       // zen
+        "точн",       // acc
+        "нажмите любую клавишу",
+        "esc команды",
+    ] {
+        assert!(
+            text.contains(said),
+            "{said:?} is missing or still English: {text}"
+        );
+    }
+    // And nothing of the chrome is left in English. `wpm` is the one exception
+    // and it is deliberate: it is a unit, the same three letters everywhere, and
+    // translating it would make the number unrecognisable.
+    for said in [
+        "punctuation",
+        "esc commands",
+        "press any key",
+        "settings",
+        "difficulty",
+    ] {
+        assert!(!text.contains(said), "{said:?} is still English: {text}");
+    }
+}
+
+/// The settings screen is the widest window in the app and the one with the most
+/// prose in it, so it is the second-worst place for a half-finished translation.
+#[test]
+fn the_settings_screen_is_fully_russian() {
+    use monkeytuipe::i18n::Lang;
+    let mut app = in_language(Lang::Russian);
+    app.press(KeyCode::F(2));
+    let text = lines(&render(&app, 92, 24)).join("\n");
+    for said in [
+        "настройки",
+        "тема",
+        "сложность",
+        "обычная",
+        "язык",
+        "свой текст",
+        "не задано",
+        "назад к набору",
+        "невозможно",
+        "авто",
+    ] {
+        assert!(text.contains(said), "{said:?} is missing: {text}");
+    }
+    for said in [
+        "settings",
+        "difficulty",
+        "custom text",
+        "not set",
+        "back to typing",
+        "auto (",
+    ] {
+        assert!(!text.contains(said), "{said:?} is still English: {text}");
+    }
+}
+
+/// The bar is the widest thing on the screen, so it is the first thing a
+/// translation breaks.
+#[test]
+fn the_bar_is_in_russian_too() {
+    use monkeytuipe::i18n::Lang;
+    let app = in_language(Lang::Russian);
+    let text = bar_row(&app, &render(&app, 92, 24));
+    for said in ["пунктуация", "цифры", "время", "слова", "цитата", "дзен"]
+    {
+        assert!(
+            text.contains(said),
+            "{said:?} is missing from the bar: {text}"
+        );
+    }
+}
+
+/// A quote test in Russian needs more columns than a quote test in English —
+/// «все короткие средние длинные толстые» is nine wider than
+/// `all short medium long thicc` — so the bar falls back to two rows rather than
+/// disappearing. A bar that vanishes for half the users is a bar most of them
+/// never see.
+#[test]
+fn a_russian_quote_bar_takes_two_rows_rather_than_vanishing() {
+    use monkeytuipe::i18n::Lang;
+    let app = in_mode(monkeytuipe::config::Mode::Quote);
+    let mut russian = App::new(
+        {
+            let mut config = Config::default();
+            config.test.mode = monkeytuipe::config::Mode::Quote;
+            config.ui_language = Lang::Russian;
+            config
+        },
+        PathBuf::from("/nonexistent/config.toml"),
+    );
+    russian.set_words(vec!["one".to_owned()]);
+    let _ = app;
+    let buffer = render(&russian, 80, 24);
+    let bar = area_text(&buffer, layout_of(&russian, &buffer).bar);
+    let rows: Vec<&str> = bar.lines().filter(|line| !line.trim().is_empty()).collect();
+    assert!(rows.len() >= 2, "the bar is on one row: {bar:?}");
+    // The modes are still on the first row, and still centred.
+    assert!(
+        rows[0].contains("дзен"),
+        "the modes are not on the first row: {bar:?}"
+    );
+    // The length moved below.
+    assert!(
+        bar.contains("толстые"),
+        "the quote lengths are gone: {bar:?}"
+    );
+    // And the screen reserved the rows it drew.
+    assert_eq!(
+        bar_rows(&russian, 80),
+        2,
+        "the reserved rows and the drawn rows differ"
+    );
+}
+
+/// The settings screen is where the language is chosen, so it has to be the screen
+/// that changes it.
+#[test]
+fn the_settings_screen_switches_language_and_says_so() {
+    use monkeytuipe::screens::Row;
+    let mut app = in_language(monkeytuipe::i18n::Lang::English);
+    app.press(KeyCode::F(2));
+    while app.selected_row() != Some(Row::InterfaceLanguage) {
+        app.press(KeyCode::Down);
+    }
+    // It starts in English and steps to the other one.
+    let before = lines(&render(&app, 92, 24)).join("\n");
+    assert!(before.contains("English"), "{before}");
+    app.press(KeyCode::Right);
+    let after = lines(&render(&app, 92, 24)).join("\n");
+    assert!(after.contains("Русский"), "the row did not change: {after}");
+    assert!(
+        after.contains("настройки"),
+        "the whole screen is not russian: {after}"
+    );
+}
+
+/// A language names itself in its own script, in the row that chooses it. Showing
+/// "English" to someone looking for русский is the wrong way round: the one thing a
+/// user cannot read is the one thing they most need to find.
+#[test]
+fn a_language_names_itself_in_its_own_script() {
+    assert_eq!(monkeytuipe::i18n::Lang::English.self_name(), "English");
+    assert_eq!(monkeytuipe::i18n::Lang::Russian.self_name(), "Русский");
+}
+
+/// And the word list's language is not translated, because a list of languages is
+/// written in the languages it names.
+#[test]
+fn the_word_list_language_is_not_translated() {
+    use monkeytuipe::i18n::Lang;
+    let mut app = in_language(Lang::Russian);
+    app.press(KeyCode::F(2));
+    while app.selected_row() != Some(monkeytuipe::screens::Row::Language) {
+        app.press(KeyCode::Down);
+    }
+    let text = lines(&render(&app, 92, 24)).join("\n");
+    assert!(
+        text.contains("english"),
+        "the word list's name was translated: {text}"
+    );
+}

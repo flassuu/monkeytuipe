@@ -137,7 +137,12 @@ pub enum QuoteLength {
 }
 
 impl QuoteLength {
-    /// The website's label.
+    /// The website's label, and the config spelling.
+    ///
+    /// Fixed, whatever the interface language — the website's own words, and what
+    /// a config file says. The translated name is [`Self::key`], which keeps
+    /// "thicc" in every language, because the website's word for the longest
+    /// bucket is the joke and translating it loses it.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::All => "all",
@@ -145,6 +150,17 @@ impl QuoteLength {
             Self::Medium => "medium",
             Self::Long => "long",
             Self::Thicc => "thicc",
+        }
+    }
+
+    /// The name as the interface shows it.
+    pub fn key(self) -> crate::i18n::Key {
+        match self {
+            Self::All => crate::i18n::Key::QuoteAll,
+            Self::Short => crate::i18n::Key::QuoteShort,
+            Self::Medium => crate::i18n::Key::QuoteMedium,
+            Self::Long => crate::i18n::Key::QuoteLong,
+            Self::Thicc => crate::i18n::Key::QuoteThicc,
         }
     }
 

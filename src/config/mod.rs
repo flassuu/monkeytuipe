@@ -25,6 +25,7 @@ impl Default for Config {
             keybinds: keybinds::Keybinds::default(),
             test: TestConfig::default(),
             submit_results: true,
+            ui_language: crate::i18n::Lang::default(),
         }
     }
 }
@@ -57,6 +58,12 @@ pub struct Config {
     pub test: TestConfig,
     /// Send finished tests to monkeytype. Requires `ape_key`.
     pub submit_results: bool,
+    /// The language the interface speaks.
+    ///
+    /// Not the same as `test.language`, which is the word list to type. The
+    /// website has no interface language at all — every string on it is English —
+    /// so this is a setting the site does not have.
+    pub ui_language: crate::i18n::Lang,
 }
 
 /// The version a config file reads as when it carries no `version` key.
@@ -121,19 +128,13 @@ pub enum Difficulty {
     Master,
 }
 
-impl Difficulty {
-    /// The name as it appears in the config file and in the UI.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Normal => "normal",
-            Self::Expert => "expert",
-            Self::Master => "master",
-        }
-    }
-}
-
 impl Mode {
     /// The name as it appears in the config file and in the UI.
+    /// The config spelling.
+    ///
+    /// Fixed, whatever the interface language: a config file is read by whoever
+    /// wrote it, and `zen` means the same thing in every language. The translated
+    /// name is [`Self::key`].
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Time => "time",
@@ -143,14 +144,38 @@ impl Mode {
             Self::Custom => "custom",
         }
     }
+
+    /// The name as the interface shows it, in the interface's language.
+    pub fn key(self) -> crate::i18n::Key {
+        match self {
+            Self::Time => crate::i18n::Key::ModeTime,
+            Self::Words => crate::i18n::Key::ModeWords,
+            Self::Quote => crate::i18n::Key::ModeQuote,
+            Self::Zen => crate::i18n::Key::ModeZen,
+            Self::Custom => crate::i18n::Key::ModeCustom,
+        }
+    }
 }
 
 impl Difficulty {
+    /// The name as it appears in the config file.
+    ///
+    /// Fixed, whatever the interface language: a config file is read by whoever
+    /// wrote it. The translated name is [`Self::key`].
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Normal => "normal",
             Self::Expert => "expert",
             Self::Master => "master",
+        }
+    }
+
+    /// The name as the interface shows it.
+    pub fn key(self) -> crate::i18n::Key {
+        match self {
+            Self::Normal => crate::i18n::Key::DifficultyNormal,
+            Self::Expert => crate::i18n::Key::DifficultyExpert,
+            Self::Master => crate::i18n::Key::DifficultyMaster,
         }
     }
 
