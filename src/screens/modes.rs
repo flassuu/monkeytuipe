@@ -16,14 +16,16 @@
 //!
 //! | key | from | to |
 //! |---|---|---|
-//! | `esc` | navigation | input — opens the command window |
-//! | `esc` | input | navigation — closes it |
 //! | `tab` | either | the other |
 //! | `i` | navigation | input |
 //!
-//! Escape is the command line on the website, so it opens the window rather than
-//! going back a level, and it is the same key that closes it — which is what a
-//! palette is expected to do, and the same way vim's `esc` works in insert mode.
+//! **Escape is deliberately not in this table.** It used to be, and having it here
+//! was the bug behind both of the reports that led to this being written down:
+//! a key this module claims is a key no screen can ever see, so a screen could
+//! not be given escape back. It is now resolved by the *screen* — the command
+//! window first, then an editor, then the settings screen, then the command line
+//! — because "escape closes the topmost thing" is a question about what is on
+//! screen, and only the screen knows that.
 //!
 //! `tab` toggles because it is the one key that is in neither mode's vocabulary:
 //! on the typing screen it is *skip*, which is a real command and has to keep
@@ -245,16 +247,6 @@ pub fn intent(key: Key, mode: Mode, surface: Surface, window_open: bool) -> Inte
         return Intent::Nothing;
     }
 
-    // Escape crosses the modes. Open from navigation, close from input, which is
-    // what the site's command line does and what vim's insert mode does.
-    if key.code == KeyCode::Esc {
-        return if window_open || mode == Mode::Input {
-            Intent::CloseInput
-        } else {
-            Intent::OpenInput
-        };
-    }
-
     // Arrows mean the same thing in every mode and on every screen. In input mode
     // the window takes them — to move its own highlight — so they are not
     // consumed here when there is one.
@@ -349,39 +341,6 @@ mod tests {
     }
 
     // ---- escape crosses the modes -------------------------------------
-
-    #[test]
-    fn escape_opens_the_window_from_navigation() {
-        assert_eq!(
-            what(
-                plain(KeyCode::Esc),
-                Mode::Navigation,
-                Surface::Browsing,
-                false
-            ),
-            Intent::OpenInput
-        );
-    }
-
-    /// The same key closes it. A palette that can be opened but not dismissed with
-    /// the key that opened it is a palette with one exit.
-    #[test]
-    fn escape_closes_the_window_from_input() {
-        assert_eq!(
-            what(plain(KeyCode::Esc), Mode::Input, Surface::Browsing, true),
-            Intent::CloseInput
-        );
-    }
-
-    #[test]
-    fn escape_from_input_closes_even_if_the_window_is_not_the_one_open() {
-        // Input mode without a window is a contradiction, and the safe reading of
-        // it is "get out of input mode" rather than "open another window".
-        assert_eq!(
-            what(plain(KeyCode::Esc), Mode::Input, Surface::Browsing, false),
-            Intent::CloseInput
-        );
-    }
 
     // ---- letters are text or commands, and that depends on the mode ----
 
@@ -595,8 +554,9 @@ mod tests {
         );
     }
 
-    /// In input mode the arrows belong to the window, which uses them to move its
-    /// own highlight. Claiming them here would be two things moving at once.
+    /// The arrows *are* claimed here, and that is the difference: a screen can be
+    /// given the arrows back by changing this function, but it cannot be given
+    /// back a key this function answers first. Which is why escape is not here.
     #[test]
     fn the_arrows_belong_to_the_window_when_it_is_open() {
         assert_eq!(

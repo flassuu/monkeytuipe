@@ -292,6 +292,14 @@ impl Settings {
         let sizes = bar::variants_sizes.len();
         match action {
             Action::Quit => vec![Effect::Quit],
+            // Escape leaves the browser without choosing. It is the same arm the
+            // editor has, and the browser had none at all — `Back` only appeared
+            // inside the *select* handling, so a user who opened the browser and
+            // changed their mind could not get out of it.
+            Action::Back => {
+                self.view = View::Rows;
+                Vec::new()
+            }
             Action::Up => {
                 self.view = View::Languages {
                     base: base.saturating_sub(1),
@@ -324,10 +332,6 @@ impl Settings {
                 let language = variants::variants(variants::POPULAR_BASES[base])[size].clone();
                 self.view = View::Rows;
                 vec![Effect::SetLanguage(language)]
-            }
-            Action::Back => {
-                self.view = View::Rows;
-                Vec::new()
             }
             _ => Vec::new(),
         }
@@ -408,14 +412,26 @@ fn row_value(app: &App, row: Row) -> (&'static str, String) {
         Row::Theme => (
             app.tr(Key::Theme),
             match app.config.theme {
-                // `auto` is not a theme, it is a decision, so it says what it
-                // decided rather than what it is.
-                // `auto` is a decision, not a theme, so it says what it decided.
+                // `auto` is a decision, not a theme, so it says what it decided
+                // rather than what it is.
                 ThemeName::Auto => {
                     format!(
                         "{} ({})",
                         app.tr(Key::ThemeAuto),
                         ThemeName::auto_for(app.terminal()).label()
+                    )
+                }
+                // And so is `terminal`, and it is a decision that can come out
+                // empty. A terminal that did not answer the colour query makes
+                // `terminal` resolve to exactly what `auto` would, so without
+                // saying so the row looks like the left arrow did nothing — which
+                // is the one row where that is most likely to be noticed, because
+                // it is the first.
+                ThemeName::Terminal if crate::terminal::palette::reported().is_empty() => {
+                    format!(
+                        "{} ({})",
+                        app.tr(Key::ThemeTerminal),
+                        app.tr(Key::ThemeNoReply)
                     )
                 }
                 other => other.label().to_owned(),

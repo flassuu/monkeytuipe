@@ -1058,6 +1058,11 @@ impl App {
         .to_owned()
     }
 
+    /// The configured difficulty, for a test or a status line.
+    pub fn difficulty(&self) -> crate::config::Difficulty {
+        self.config.test.difficulty
+    }
+
     /// The language the interface speaks.
     ///
     /// Read from the config on every call rather than cached: it is a value in a
@@ -1897,6 +1902,19 @@ impl App {
 
     /// Maps a key to an action using the configured keybinds.
     ///
+    /// No key is special-cased here, and that is deliberate. Escape used to be
+    /// hard-coded to the command list, which meant the keybind table's default
+    /// `back: esc` was dead and no screen could decide what escape meant. Now the
+    /// table is the only answer, and the screens get to have their own:
+    ///
+    /// | what is on screen | escape does |
+    /// |---|---|
+    /// | the command window | close it, acting on nothing |
+    /// | a settings editor | discard the edit |
+    /// | the settings screen | back to the typing screen |
+    /// | typing or results | open the command list, which is the site's binding |
+    ///
+    ///
     /// On the typing screen a printable key is *always* text, even when the
     /// keybind table claims it: a typist has to be able to type `t`, `,` or `q`,
     /// all of which are words as much as they are commands. The defaults avoid
@@ -1927,12 +1945,6 @@ impl App {
             }
         }
 
-        // Escape opens the command list, which is what the site binds it to when
-        // `quickRestart` is "off" — the default, and in that state escape has no
-        // other job.
-        if key.code == KeyCode::Esc && key.modifiers.is_empty() {
-            return Some(Action::Command);
-        }
         // Shift+Enter ends a zen test, which is the only way out of one: it has
         // no length and therefore no way to run out.
         if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -3558,6 +3570,193 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- escape is a stack --------------------------------------------
+
+    /// Escape closes the topmost thing, and the *screen* decides what that is.
+    ///
+    /// Three things used to answer, in this order: the mode rules claimed escape
+    /// before any screen saw it, `resolve` hard-coded it to the command list, and
+    /// the keybind table's default `back: esc` was dead behind both. A key the
+    /// mode rules consume is a key a screen can never be given back, so the
+    /// settings screen could not leave and an editor could not be discarded.
+    ///
+    /// The settings screen goes back. It did not: escape opened the command list
+    /// over it, and stayed there.
+    #[test]
+    fn escape_leaves_the_settings_screen() {
+        let mut app = app();
+        app.on_key(press(KeyCode::F(2))).expect("no io");
+        assert_eq!(app.screen_kind(), ScreenKind::Settings);
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert_eq!(
+            app.screen_kind(),
+            ScreenKind::Typing,
+            "escape did not go back"
+        );
+        assert!(
+            !app.input_is_open(),
+            "escape opened the command list instead"
+        );
+    }
+
+    /// An editor discards, and does not open the command list over it. This is the
+    /// worse of the two: the text being edited is the user's own, and a palette
+    /// opening on top of it looks like the edit was saved.
+    #[test]
+    fn escape_discards_an_edit_and_opens_nothing() {
+        let mut app = app();
+        app.on_key(press(KeyCode::F(2))).expect("no io");
+        // Walk to a row that opens an editor.
+        while app.selected_row() != Some(Row::ApeKey) {
+            app.on_key(press(KeyCode::Down)).expect("no io");
+        }
+        app.on_key(press(KeyCode::Enter)).expect("no io");
+        for c in "thrownaway".chars() {
+            app.on_key(press(KeyCode::Char(c))).expect("no io");
+        }
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert!(
+            !app.input_is_open(),
+            "escape opened the command list over the editor"
+        );
+        assert_eq!(
+            app.screen_kind(),
+            ScreenKind::Settings,
+            "escape left the settings screen"
+        );
+        // And the value is untouched.
+        assert!(
+            app.config.resolved_ape_key().is_none(),
+            "the discarded edit was saved anyway"
+        );
+    }
+
+    /// The command window is on top, so escape closes it — and closes it *without
+    /// acting*. A palette that runs its highlighted match on the way out runs a
+    /// command the user did not choose.
+    #[test]
+    fn escape_closes_the_command_window_without_running_anything() {
+        let mut app = app();
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert!(app.input_is_open());
+        for c in "punc".chars() {
+            app.on_key(press(KeyCode::Char(c))).expect("no io");
+        }
+        let before = app.config.test.punctuation;
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert!(!app.input_is_open(), "the window did not close");
+        assert_eq!(
+            app.config.test.punctuation, before,
+            "escape ran the highlighted command"
+        );
+    }
+
+    /// On the typing screen escape is still the command list, which is what the
+    /// website binds it to when `quickRestart` is off. Making it go back from
+    /// there would break the one binding every monkeytype user knows.
+    #[test]
+    fn escape_is_still_the_command_list_on_the_typing_screen() {
+        let mut app = app();
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert!(app.input_is_open(), "escape did not open the command list");
+        assert_eq!(app.screen_kind(), ScreenKind::Typing);
+    }
+
+    /// And on the results screen, which is where a re-run usually starts from.
+    #[test]
+    fn escape_is_the_command_list_on_the_results_screen_too() {
+        let mut app = finished(12);
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert!(app.input_is_open());
+        assert_eq!(app.screen_kind(), ScreenKind::Results);
+    }
+
+    /// Each layer is closed by escape, in order, and the one under it is intact.
+    /// The stack is the whole design: this walks all of it in one test.
+    #[test]
+    fn escape_unwinds_one_layer_at_a_time() {
+        let mut app = app();
+        // 0: typing.
+        assert_eq!(app.screen_kind(), ScreenKind::Typing);
+        // 1: settings.
+        app.on_key(press(KeyCode::F(2))).expect("no io");
+        assert_eq!(app.screen_kind(), ScreenKind::Settings);
+        // 2: the language browser, inside the settings.
+        while app.selected_row() != Some(Row::Language) {
+            app.on_key(press(KeyCode::Down)).expect("no io");
+        }
+        app.on_key(press(KeyCode::Enter)).expect("no io");
+        assert!(
+            matches!(
+                app.view_kind(),
+                Some(crate::screens::settings::View::Languages { .. })
+            ),
+            "the browser did not open: {:?}",
+            app.view_kind()
+        );
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert_eq!(
+            app.view_kind(),
+            Some(&crate::screens::settings::View::Rows),
+            "escape did not close the browser"
+        );
+        assert_eq!(
+            app.screen_kind(),
+            ScreenKind::Settings,
+            "escape went too far"
+        );
+        // 3: back to typing.
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert_eq!(
+            app.screen_kind(),
+            ScreenKind::Typing,
+            "escape did not go back"
+        );
+        // 4: the command list, which is the site's binding and the last layer.
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert!(app.input_is_open());
+    }
+
+    /// Escape is not claimed by the keybind table's `back` binding on the typing
+    /// screen, because that is what the command list is. The table is not shadowed
+    /// any more — the screens simply disagree about what `back` means, which is the
+    /// honest arrangement.
+    #[test]
+    fn the_back_binding_is_live_rather_than_shadowed() {
+        // `back` is bound to escape by default, and reaching `Action::Back` at all
+        // is the proof: before, `resolve` short-circuited escape to `Action::Command`
+        // and this binding could never fire.
+        let app = app();
+        let back = app.config.keybinds.all();
+        let keys = back
+            .iter()
+            .find(|(action, _)| *action == Action::Back)
+            .expect("a back binding");
+        assert!(keys.1.iter().any(|key| key == "esc"), "{keys:?}");
+    }
+
+    /// A theme row that looks the same before and after the arrow is a row that
+    /// looks broken. `auto` and `terminal` resolve identically when the terminal
+    /// did not answer the colour query, so the row has to say so.
+    #[test]
+    fn the_terminal_theme_says_when_the_terminal_did_not_answer() {
+        let mut app = app();
+        app.on_key(press(KeyCode::F(2))).expect("no io");
+        // The palette is never queried in a test, so `terminal` has nothing to
+        // work from — which is exactly the case worth being honest about.
+        app.on_key(press(KeyCode::Right)).expect("no io");
+        assert_eq!(app.config.theme, crate::config::theme::ThemeName::Terminal);
+        let value = crate::screens::settings::row_values(&app)
+            .into_iter()
+            .find(|(name, _)| *name == "theme")
+            .map(|(_, value)| value)
+            .expect("a theme row");
+        assert!(
+            value.contains("no reply"),
+            "the row does not say the terminal did not answer: {value:?}"
+        );
     }
 
     #[test]

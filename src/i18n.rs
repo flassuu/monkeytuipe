@@ -222,7 +222,9 @@ strings! {
     InterfaceLanguage    => ["interface language", "язык интерфейса"],
     SubmitResults        => ["submit results", "отправлять результаты"],
     BackToTyping         => ["back to typing",  "назад к набору"],
-    ThemeAuto            => ["auto",  "авто"],
+    ThemeAuto            => ["auto",       "авто"],
+    ThemeTerminal        => ["terminal",   "терминал"],
+    ThemeNoReply         => ["no reply",   "нет ответа"],
     NoApeKeySet          => [
         "no ApeKey set — reads need one",
         "ключ ape не задан — для чтения нужен",

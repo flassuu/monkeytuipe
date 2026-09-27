@@ -114,9 +114,17 @@ impl Screen for Results {
         match action {
             // Leaving for a new test restarts it, so the user is not dropped
             // back onto a finished test with a fresh word list and no clock.
-            Action::Restart | Action::StartTest | Action::Back => {
+            Action::Restart | Action::StartTest => {
                 vec![Effect::Switch(ScreenKind::Typing), Effect::RestartTest]
             }
+            // Escape is the command list here, not a restart.
+            //
+            // It used to restart: `resolve` hard-coded escape to the command list,
+            // so this arm was dead — and when escape was un-hardcoded the dead arm
+            // woke up and escape silently threw away a finished test. A key that
+            // discards a result on a single press is the worst key on the screen,
+            // and the footer already says what escape does.
+            Action::Back => vec![Effect::OpenCommands],
             Action::Settings => vec![Effect::Switch(ScreenKind::Settings)],
             Action::Quit => vec![Effect::Quit],
             // A finished test is a result, not a place to type. Anything that
