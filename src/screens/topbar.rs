@@ -43,6 +43,7 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::config::bar::{self, Field};
+use crate::config::icons;
 use crate::config::theme::Theme;
 use crate::config::Difficulty;
 use crate::config::Mode as ConfigMode;
@@ -162,9 +163,13 @@ pub struct Button {
     /// The Nerd Font glyph in front of the label, or empty for a length.
     ///
     /// Carried rather than looked up, for the same reason the label is: the render
-    /// must not have to know which mode a button is to draw it, or the same button
+    /// must not have to know which item a button is to draw it, or the same button
     /// would need two answers depending on who asked.
-    pub icon: &'static str,
+    ///
+    /// Owned because it can come from `config.toml` now — see
+    /// [`crate::config::icons`] — and a `&'static str` cannot be something the user
+    /// typed.
+    pub icon: String,
     /// What it changes.
     pub field: Field,
     pub active: bool,
@@ -323,6 +328,12 @@ pub struct BarState<'a> {
     pub language: &'a str,
     /// The interface language, which is what the labels are in.
     pub ui_language: crate::i18n::Lang,
+    /// The user's glyphs, or the built-in ones.
+    ///
+    /// Carried rather than reached for: the bar is built from a [`BarState`] and not
+    /// from a config, so a glyph decision made in the config has to be handed in the
+    /// same way the interface language is.
+    pub icons: &'a crate::config::icons::Icons,
 }
 
 impl Bar {
@@ -339,14 +350,14 @@ impl Bar {
             let disabled = state.mode == ConfigMode::Quote;
             left.push(Button {
                 label: tr(state.ui_language, crate::i18n::Key::Punctuation),
-                icon: icon::PUNCTUATION,
+                icon: state.icons.glyph(icons::Item::Punctuation).to_owned(),
                 field: Field::Punctuation,
                 active: state.punctuation,
                 disabled,
             });
             left.push(Button {
                 label: tr(state.ui_language, crate::i18n::Key::Numbers),
-                icon: icon::NUMBERS,
+                icon: state.icons.glyph(icons::Item::Numbers).to_owned(),
                 field: Field::Numbers,
                 active: state.numbers,
                 disabled,
@@ -358,7 +369,7 @@ impl Bar {
                 for seconds in bar::TIMES {
                     right.push(Button {
                         label: seconds.to_string(),
-                        icon: "",
+                        icon: String::new(),
                         field: Field::Time,
                         active: state.time == seconds,
                         disabled: false,
@@ -369,7 +380,7 @@ impl Bar {
                 // in effect.
                 right.push(Button {
                     label: tr(state.ui_language, crate::i18n::Key::Other),
-                    icon: icon::OTHER,
+                    icon: state.icons.glyph(icons::Item::Other).to_owned(),
                     field: Field::TimeCustom,
                     active: !bar::TIMES.contains(&state.time),
                     disabled: false,
@@ -379,7 +390,7 @@ impl Bar {
                 for words in bar::WORD_COUNTS {
                     right.push(Button {
                         label: words.to_string(),
-                        icon: "",
+                        icon: String::new(),
                         field: Field::Words,
                         active: state.words == words,
                         disabled: false,
@@ -387,7 +398,7 @@ impl Bar {
                 }
                 right.push(Button {
                     label: tr(state.ui_language, crate::i18n::Key::Other),
-                    icon: icon::OTHER,
+                    icon: state.icons.glyph(icons::Item::Other).to_owned(),
                     field: Field::WordsCustom,
                     active: !bar::WORD_COUNTS.contains(&state.words),
                     disabled: false,
@@ -396,7 +407,7 @@ impl Bar {
             ConfigMode::Quote => {
                 right.push(Button {
                     label: tr(state.ui_language, crate::i18n::Key::QuoteAll),
-                    icon: "",
+                    icon: String::new(),
                     field: Field::QuoteLength,
                     active: state.quote_length == bar::QuoteLength::All,
                     disabled: false,
@@ -404,7 +415,7 @@ impl Bar {
                 for length in bar::QUOTE_LENGTHS.iter().skip(1) {
                     right.push(Button {
                         label: tr(state.ui_language, length.key()),
-                        icon: "",
+                        icon: String::new(),
                         field: Field::QuoteLength,
                         active: state.quote_length == *length,
                         disabled: false,
@@ -421,7 +432,7 @@ impl Bar {
                             crate::i18n::Key::Add
                         },
                     ),
-                    icon: "",
+                    icon: String::new(),
                     field: Field::CustomText,
                     active: state.has_custom_text,
                     disabled: false,
@@ -436,7 +447,7 @@ impl Bar {
             .iter()
             .map(|mode| Button {
                 label: tr(state.ui_language, mode.key()),
-                icon: icon::for_mode(*mode),
+                icon: state.icons.glyph(icons::Item::from_mode(*mode)).to_owned(),
                 field: Field::Mode,
                 active: *mode == state.mode,
                 disabled: false,
@@ -525,26 +536,11 @@ impl Bar {
         // the side cells hold different things in different modes — so the modes
         // jumped about four columns every time the mode changed. A settings bar whose
         // controls move when you change a setting is a bar you have to find again.
-        let centre_w = self.centre.width(CELL_GAP, 0, icons) + 2;
+        let centre_w = self.centre.width(CELL_GAP, 0, icons) + 2 + CENTRE_AIR;
         let side_w = inner.saturating_sub(centre_w) / 2;
         // An odd column goes to the left, so the right-hand divider is as close to
         // the edge as the geometry allows and the left-hand padding absorbs the rest.
-        let mut cells = [side_w + (inner - centre_w - side_w * 2), centre_w, side_w];
-        // What each cell needs, which is what the spare is measured against. The
-        // centre's air is taken from the sides, so the sides' needs have to be known
-        // before the row is laid out.
-        //
-        // A side cell needs one column, not two: it is centred, so a single spare
-        // column lands on one side of its text, and the site's `place-self-end` puts
-        // it against the divider, which is where the space is wanted. The centre
-        // needs two, because it has a divider on *both* sides of it. The difference is
-        // three columns across the whole bar, and three columns is the difference
-        // between a Russian bar drawing at eighty and not drawing at all.
-        let needed: [usize; 3] = [
-            self.left.width(CELL_GAP, 0, icons) + 1,
-            centre_w,
-            self.right.width(CELL_GAP, 0, icons) + 1,
-        ];
+        let cells = [side_w + (inner - centre_w - side_w * 2), centre_w, side_w];
 
         let counts = [
             self.left.buttons.len(),
@@ -572,15 +568,35 @@ impl Bar {
         // `place-self-end` does — because a cell flush against the outer border and a
         // cell flush against the centre read as two different kinds of thing, and a
         // bar of three different things is not a bar.
-        // The centre gets some air, taken from the two side cells' leftover. They
-        // are sized to what is in them rather than to the screen, so at any width
-        // that drew the bar at all they have some to give — and at the narrowest
-        // width that draws they have none, and the air is simply zero.
-        let spare = cells[0].saturating_sub(needed[0]) + cells[2].saturating_sub(needed[2]);
-        let air = CENTRE_AIR.min(spare / 2) * 2;
-        cells[0] -= air / 2;
-        cells[2] -= air / 2;
-
+        // The row. Every cell's text is centred in its own cell, and the cells are
+        // exactly `inner` wide, so the closing border lands on the last column.
+        //
+        // There is no extra air for the centre beyond its own content, and that is a
+        // decision rather than an omission. It was tried twice and both attempts broke
+        // something worse:
+        //
+        // Giving the centre extra *padding* while taking the air out of the two side
+        // cells' *widths* moved the centre's text without moving the centre, so the
+        // row came out six columns narrower than the frame it was drawn inside: a
+        // ragged right edge, a right cell with its text shoved to one side, and a
+        // centre with its text off-centre. All three from one line.
+        //
+        // Actually widening the centre is the other half of the same trade, and it
+        // cannot be had for free either. The centre's width has to be a function of
+        // its own content and the terminal width and *nothing else* — that is what
+        // keeps the mode buttons from moving when the mode changes, since the five
+        // mode buttons are the same five whatever the mode. Any extra width taken
+        // from the side cells depends on how much *they* have spare, which is
+        // different in every mode, so the centre would move every time the mode
+        // changed. Adding the extra to the bar's *minimum* width instead keeps the
+        // modes still and costs one column of minimum width per column of air — and
+        // the Russian bar is already at exactly eighty, so the first column of air
+        // is the one that takes the bar off an eighty-column terminal.
+        //
+        // So the centre is `1fr auto 1fr`'s auto column and the sides take the
+        // remainder, and the centre is already the widest of the three by a wide
+        // margin. If it should be wider still, that is a one-line change to
+        // `CENTRE_AIR` and a decision about the eighty-column Russian bar.
         let row = {
             let mut spans: Vec<Span<'static>> = vec![Span::styled(BORDER, frame_style(theme))];
             for (index, cell_width) in cells.iter().enumerate() {
@@ -629,15 +645,19 @@ impl Bar {
     /// drawn as designed, and the width at which it can be drawn at all.
     pub fn narrowest_with(&self, icons: bool) -> usize {
         // The centre plus its own margins, and the wider side cell plus its margins
-        // on *both* sides — the two side cells are the same width, so the narrower
-        // one has to fit in the wider one's space.
+        // on *both* sides — the two side cells are the same width, so the narrower one
+        // has to fit in the wider one's space. A side cell's margin is one column and
+        // the centre's is two, because the centre has a divider on both sides of it
+        // and a side cell has one.
         //
-        // The centre's extra air is not in here, and that is the point: it is taken
-        // from whatever the side cells have left over, and at this width they have
-        // nothing. If the air were a fixed part of the centre the bar would need four
-        // more columns than it does, and an eighty-column terminal would lose the bar
-        // altogether rather than losing two columns of padding.
-        let centre = self.centre.width(CELL_GAP, 0, icons) + 2;
+        // This number is the reason nothing overflows. The row is laid out at fixed
+        // offsets, so a cell holding more than its width pushes the closing border
+        // along and the frame comes out the wrong width — which is exactly what an
+        // earlier attempt at widening the centre did, by taking air out of a side cell
+        // that had none to spare. Every column this does *not* include is a column
+        // that has to come from somewhere, and there is nowhere in the bar that is not
+        // already spoken for.
+        let centre = self.centre.width(CELL_GAP, 0, icons) + 2 + CENTRE_AIR;
         let side = self
             .left
             .width(CELL_GAP, 0, icons)
@@ -708,19 +728,25 @@ const BORDER: &str = "│";
 /// The space between two buttons in a cell.
 const CELL_GAP: usize = 1;
 
-/// The extra air inside the centre cell, on each side of its content.
+/// Extra air for the centre cell, in columns, on top of its own content.
 ///
-/// The centre holds the five modes, so it is already the widest block by
-/// arithmetic; this is what makes it *look* like the main one rather than merely
-/// measuring like it.
+/// **Zero, and that is a decision rather than an omission.** The centre cell is
+/// already the widest of the three: it holds the five modes against a two-button
+/// cell on the left and a row of numbers on the right.
 ///
-/// It is taken from the side cells' leftover rather than added to the bar's minimum
-/// width, which is why it costs nothing when the terminal is tight: the side cells
-/// are sized to what is in them, so at the narrowest width that draws there is no
-/// leftover to take and the air is simply zero. Adding it to the minimum instead
-/// would have cost four columns, and four columns is the difference between an
-/// eighty-column terminal drawing the bar and drawing nothing.
-const CENTRE_AIR: usize = 3;
+/// Raising this is not free, and both ways of paying were tried:
+///
+/// - Taking the air out of the two side cells' widths depends on how much *they*
+///   have spare, and the side cells hold different things in different modes, so the
+///   centre — and therefore the mode buttons — move every time the mode changes.
+/// - Adding it to the bar's minimum width keeps the modes still and costs one column
+///   of minimum width per column here. The Russian bar is at exactly eighty, so the
+///   first column of air is the one that takes the bar off an eighty-column
+///   terminal.
+///
+/// The centre can be made wider the moment that trade is worth making; this constant
+/// is the whole of it.
+const CENTRE_AIR: usize = 0;
 
 /// Renders one cell's buttons.
 ///
@@ -838,6 +864,7 @@ impl<'a> From<&'a crate::config::Config> for BarState<'a> {
             has_custom_text: !test.custom_text.is_empty(),
             language: &test.language,
             ui_language: config.ui_language,
+            icons: &config.icons,
         }
     }
 }
@@ -894,8 +921,27 @@ mod tests {
             has_custom_text: false,
             language: "english",
             ui_language: lang,
+            // The built-in glyphs, on. A test that wants a different set says so
+            // rather than relying on the default the app happens to have.
+            icons: &BUILT_IN,
         }
     }
+
+    /// The built-in glyph set, on.
+    ///
+    /// A `const` in a test module rather than a call to `Config::default()`, so that a
+    /// test reads as "the built-in glyphs" and not as "whatever the default is today".
+    static BUILT_IN: crate::config::icons::Icons = crate::config::icons::Icons {
+        enabled: true,
+        punctuation: None,
+        numbers: None,
+        time: None,
+        words: None,
+        quote: None,
+        zen: None,
+        custom: None,
+        other: None,
+    };
 
     /// The labels of a block, in order.
     fn labels(card: &Card) -> Vec<String> {
@@ -1197,7 +1243,7 @@ mod tests {
         button_span(
             &Button {
                 label: "punctuation".to_owned(),
-                icon: icon::PUNCTUATION,
+                icon: icon::PUNCTUATION.to_owned(),
                 field: Field::Punctuation,
                 active,
                 disabled: false,
@@ -1262,7 +1308,7 @@ mod tests {
         let style = button_span(
             &Button {
                 label: "punctuation".to_owned(),
-                icon: icon::PUNCTUATION,
+                icon: icon::PUNCTUATION.to_owned(),
                 field: Field::Punctuation,
                 active: true,
                 disabled: true,
@@ -1599,6 +1645,77 @@ mod tests {
                 icon::TABLE.iter().any(|(_, t)| *t == glyph),
                 "icon::{name} is not in the table"
             );
+        }
+    }
+
+    /// The box's right border is on the last column, and every cell's text is centred
+    /// inside its own cell.
+    ///
+    /// The border used to stop six columns short of the edge and both kinds of cell
+    /// looked off-centre, all three from one line: the centre was given extra
+    /// *padding* while the air was taken out of the two side cells' *widths*. So the
+    /// text moved and the cell did not, and the row was `air` columns narrower than
+    /// the frame it was drawn inside.
+    ///
+    /// `a_rendered_bar_is_exactly_as_wide_as_it_claims` could not have caught it,
+    /// because it sums the widths of the spans the bar *emits* — and those summed to
+    /// `width`. They were simply not laid out at the offsets the frame was drawn at.
+    /// This one walks the drawn characters instead.
+    #[test]
+    fn the_frame_ends_on_the_last_column_and_every_cell_is_centred() {
+        let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
+        for mode in [
+            ConfigMode::Time,
+            ConfigMode::Words,
+            ConfigMode::Quote,
+            ConfigMode::Zen,
+        ] {
+            let bar = Bar::build(state(mode));
+            for width in [200u16, 120, 100, 92] {
+                let Some(lines) = bar.render(width, theme) else {
+                    continue;
+                };
+                let middle = lines[Bar::ROWS as usize / 2].clone();
+                let text: String = middle.spans.iter().map(|s| s.content.as_ref()).collect();
+                let cells: Vec<char> = text.chars().collect();
+                assert_eq!(
+                    cells.len(),
+                    width as usize,
+                    "{mode:?} at {width}: the row is {} cells, not {width}",
+                    cells.len()
+                );
+                assert_eq!(
+                    cells[width as usize - 1],
+                    BORDER.chars().next().expect("a border"),
+                    "{mode:?} at {width}: the frame stops {} columns short",
+                    width as usize - 1 - cells.iter().rposition(|c| *c != ' ').unwrap_or(0)
+                );
+
+                // Each cell's two margins differ by at most one column, which is all
+                // "centred" can mean when the slack is odd.
+                let edges: Vec<usize> = cells
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| **c == BORDER.chars().next().expect("a border"))
+                    .map(|(i, _)| i)
+                    .collect();
+                assert_eq!(edges.len(), 4, "{mode:?} at {width}: {edges:?}");
+                for (index, pair) in edges.windows(2).enumerate() {
+                    let (from, to) = (pair[0] + 1, pair[1]);
+                    let content: String = cells[from..to].iter().collect();
+                    let trimmed = content.trim_matches(' ');
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let before = content.chars().take_while(|c| *c == ' ').count();
+                    let after = content.chars().rev().take_while(|c| *c == ' ').count();
+                    assert!(
+                        before.abs_diff(after) <= 1,
+                        "{mode:?} at {width}: cell {index} has {before} before and {after} \
+                         after its text, in {content:?}"
+                    );
+                }
+            }
         }
     }
 

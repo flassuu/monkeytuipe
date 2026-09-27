@@ -1,6 +1,7 @@
 //! On-disk configuration.
 
 pub mod bar;
+pub mod icons;
 pub mod keybinds;
 pub mod terminal;
 pub mod theme;
@@ -26,6 +27,12 @@ impl Default for Config {
             test: TestConfig::default(),
             submit_results: true,
             ui_language: crate::i18n::Lang::default(),
+            icons: icons::Icons {
+                // The built-in Nerd Font glyphs, on by default. A config that says
+                // nothing gets them, so an existing file is unchanged.
+                enabled: true,
+                ..icons::Icons::default()
+            },
         }
     }
 }
@@ -64,6 +71,15 @@ pub struct Config {
     /// website has no interface language at all — every string on it is English —
     /// so this is a setting the site does not have.
     pub ui_language: crate::i18n::Lang,
+    /// The bar's glyphs, or the built-in ones.
+    ///
+    /// A setting rather than a constant because a wrong glyph is not the only reason
+    /// a user might want a different one: a terminal whose font has no Nerd Font
+    /// glyphs draws boxes, and one that treats Private Use Area characters as
+    /// double-width — which every Nerd Font glyph is, they are all ambiguous width —
+    /// draws each of them twice as wide as the bar reserved and the frame goes out of
+    /// shape. Neither is something the author of the glyph table can see.
+    pub icons: icons::Icons,
 }
 
 /// The version a config file reads as when it carries no `version` key.
