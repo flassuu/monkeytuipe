@@ -827,3 +827,151 @@ fn a_correctly_typed_word_is_not_drawn_in_the_error_colour() {
         "the wrong characters are not exactly the wrong word"
     );
 }
+
+// ---- the settings window ------------------------------------------------
+
+/// A settings screen showing the row list.
+fn settings_app() -> App {
+    let mut app = in_mode(monkeytuipe::config::Mode::Time);
+    app.press(KeyCode::F(2));
+    app
+}
+
+/// The settings screen is a window in the same style as the command window: same
+/// box, same title in the top border, same rounded corners.
+#[test]
+fn the_settings_screen_looks_like_the_command_window() {
+    let app = settings_app();
+    let buffer = render(&app, 92, 24);
+    let text = lines(&buffer).join("\n");
+    assert!(text.contains('╭'), "no rounded box: {text}");
+    assert!(text.contains("settings"), "no title: {text}");
+}
+
+/// A truncated value is worse than no value, and the first version cut every one
+/// of them off by exactly the width of the selection marker — which is the kind of
+/// bug that only shows up on the row with the longest value.
+#[test]
+fn no_settings_value_is_cut_off() {
+    let app = settings_app();
+    let buffer = render(&app, 92, 24);
+    let text = lines(&buffer).join("\n");
+    for (_, value) in monkeytuipe::screens::settings::row_values(&app) {
+        assert!(
+            text.contains(&value),
+            "the value {value:?} is cut off: {text}"
+        );
+    }
+}
+
+/// The names and the values are two columns, so the values all end in the same
+/// place. A list where each value starts somewhere different cannot be scanned.
+#[test]
+fn the_settings_values_line_up_in_a_column() {
+    let app = settings_app();
+    let buffer = render(&app, 92, 24);
+    let ends: Vec<usize> = lines(&buffer)
+        .into_iter()
+        .filter_map(|line| {
+            let trimmed = line.trim_end_matches('│').trim_end();
+            let inner = trimmed.trim_start_matches('│');
+            // A row line ends in the value, and the value is the last thing before
+            // the right border.
+            let before = inner.trim_end();
+            if before.ends_with("not set")
+                || before.ends_with("normal")
+                || before.ends_with("english")
+                || before.ends_with("see below")
+                || before.ends_with("monkeytype)")
+            {
+                Some(before.chars().count())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(ends.len() >= 5, "only found {ends:?}");
+    let first = ends[0];
+    assert!(
+        ends.iter().all(|end| *end == first),
+        "the values do not line up: {ends:?}"
+    );
+}
+
+/// The hint names both the arrows and the vim keys, and both work. A hint that
+/// mentions one and the app does the other is worse than no hint.
+#[test]
+fn the_settings_hint_names_the_vim_keys_and_the_arrows() {
+    let app = settings_app();
+    let buffer = render(&app, 92, 24);
+    let text = lines(&buffer).join("\n");
+    for expected in ["hl", "jk", "←→", "↑↓", "i commands"] {
+        assert!(
+            text.contains(expected),
+            "{expected:?} missing from the hint: {text}"
+        );
+    }
+}
+
+/// And the language browser is alphabetical, which is the point of it being
+/// alphabetical: you find a language you already know the name of.
+#[test]
+fn the_language_browser_lists_languages_alphabetically() {
+    let mut app = settings_app();
+    while app.selected_row() != Some(monkeytuipe::screens::Row::Language) {
+        app.press(KeyCode::Down);
+    }
+    app.press(KeyCode::Enter);
+    let buffer = render(&app, 92, 30);
+    let text = lines(&buffer).join("\n");
+    let at = |name: &str| {
+        text.find(name)
+            .unwrap_or_else(|| panic!("no {name} in {text}"))
+    };
+    // Only the languages that are on screen, which is not all of them on a
+    // thirty-row terminal — the browser is a list, and a list has a bottom.
+    assert!(at("arabic") < at("english"), "{text}");
+    assert!(at("english") < at("french"), "{text}");
+    assert!(at("french") < at("german"), "{text}");
+    assert!(at("german") < at("italian"), "{text}");
+}
+
+// ---- the two modes, on screen -------------------------------------------
+
+/// The status line says which mode the keyboard is in, before and after `esc`.
+#[test]
+fn the_status_line_shows_the_keyboard_mode() {
+    let app = in_mode(monkeytuipe::config::Mode::Time);
+    let before = lines(&render(&app, 92, 24)).join("\n");
+    assert!(before.contains("[NAV]"), "{before}");
+
+    let mut app = in_mode(monkeytuipe::config::Mode::Time);
+    app.press(KeyCode::Esc);
+    let after = lines(&render(&app, 92, 24)).join("\n");
+    assert!(after.contains("[INS]"), "{after}");
+}
+
+/// `i` opens the window from the settings screen and types an `i` on the typing
+/// screen. The difference is the whole point, so it is checked on screen rather
+/// than only in the mode rules.
+#[test]
+fn i_opens_the_window_off_the_test_and_types_on_it() {
+    // The box is what says "window", not the word "commands": the settings hint
+    // mentions `i commands` and would make the naive check pass either way.
+    let mut app = settings_app();
+    app.press(KeyCode::Char('i'));
+    let opened = lines(&render(&app, 92, 24)).join("\n");
+    assert!(
+        opened.contains("╭ commands"),
+        "i did not open the window: {opened}"
+    );
+
+    let mut app = in_mode(monkeytuipe::config::Mode::Time);
+    app.type_char('i');
+    let typed = lines(&render(&app, 92, 24)).join("\n");
+    assert!(
+        !typed.contains("╭ commands"),
+        "i opened the window on the typing screen: {typed}"
+    );
+    assert!(typed.contains('i'), "i did not reach the words: {typed}");
+}

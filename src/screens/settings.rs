@@ -22,10 +22,8 @@
 //! language. Two columns — bases down the side, sizes across the top — is the
 //! shape the data actually has.
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::action::Action;
@@ -34,6 +32,13 @@ use crate::config::bar;
 use crate::config::theme::ThemeName;
 use crate::screens::{Effect, Row, Screen, ScreenKind};
 use crate::words::variants;
+
+/// The key hints, in one place.
+///
+/// A hint is prose, and prose that does not fit is a sentence that stops in the
+/// middle. It is also the only place the vim keys and the arrows are both
+/// mentioned, so it has to name both.
+const HINT: &str = "←→ or hl change · enter open · ↑↓ or jk move · i commands · esc close";
 
 /// The rows, in display order. `Back` is last so `↑` from the top reaches it.
 pub const ROWS: [Row; 7] = [
@@ -97,70 +102,77 @@ impl Settings {
 impl Screen for Settings {
     fn render(&self, app: &App, frame: &mut Frame) {
         let theme = app.theme();
-        let area = block_of(app, frame);
+        // Every view of this screen is one window in the same style as the command
+        // window. They were drawn separately before, which is how two things that
+        // are the same mechanism end up looking like two.
+        let area = frame.area();
+        let width = width_of(app, area.width);
+        let height = self.height(area.height);
+        let title = self.title();
+        let Some(chrome) = super::chrome::Chrome::place(area, width, height, title, theme, frame)
+        else {
+            return;
+        };
 
+        let mut lines: Vec<Line<'static>> = Vec::new();
         match &self.view {
             View::Rows => {
-                let rows = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Fill(1), Constraint::Length(1)])
-                    .split(area);
-                frame.render_widget(Paragraph::new(row_items(app, self.selected)), rows[0]);
-                let _ = &theme;
-                // The account line is here because the ApeKey is here: the two
-                // are the same setting and the same question.
-                if rows[0].height > ROWS.len() as u16 + 1 {
-                    let account =
-                        Rect::new(rows[0].x, rows[0].y + rows[0].height - 1, rows[0].width, 1);
-                    frame.render_widget(
-                        Paragraph::new(super::results::account_line(app, theme)),
-                        account,
-                    );
-                }
-                frame.render_widget(
-                    Paragraph::new(hint(&theme, "←→ change · enter open · ↑↓ move · esc back")),
-                    rows[1],
-                );
-            }
-            View::Languages { base, size } => {
-                frame.render_widget(Paragraph::new(language_items(app, *base, *size)), area);
-            }
-            View::Editor { row, text } => {
-                let lines = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(1),
-                        Constraint::Length(3),
-                        Constraint::Length(1),
-                    ])
-                    .split(area);
-                frame.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        Span::styled(
-                            format!(" {} ", editor_title(*row)),
+                for (index, row) in ROWS.iter().enumerate() {
+                    let (name, value) = row_value(app, *row);
+                    let mut spans = vec![Span::raw(if index == self.selected {
+                        "▸ "
+                    } else {
+                        "  "
+                    })];
+                    spans.push(Span::styled(
+                        name.to_owned(),
+                        if index == self.selected {
                             Style::default()
                                 .fg(theme.accent)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw("   "),
-                        Span::styled(editor_help(*row), Style::default().fg(theme.muted)),
-                    ])),
-                    lines[0],
-                );
-                // No inner box: the screen already has one, and a box inside a
-                // box reads as a dialog inside a dialog.
-                frame.render_widget(
-                    Paragraph::new(text.as_str())
-                        .wrap(Wrap { trim: false })
-                        .style(theme.value()),
-                    lines[1],
-                );
-                frame.render_widget(
-                    Paragraph::new(hint(&theme, "enter save · esc cancel")),
-                    lines[2],
-                );
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(theme.foreground)
+                        },
+                    ));
+                    // The value is right-aligned against the window's right edge
+                    // rather than sitting two spaces after the name, so the names
+                    // make a column and the values make another. A list where the
+                    // values start somewhere different on every row is a list you
+                    // cannot scan.
+                    //
+                    // The padding is the *inner* width less the two columns and the
+                    // two-character marker. Getting that arithmetic wrong by the
+                    // width of the marker is what truncated every value by two
+                    // characters the first time.
+                    let used = 2 + name.chars().count() as u16 + value.chars().count() as u16;
+                    let pad = chrome.inner.width.saturating_sub(used);
+                    if pad > 0 {
+                        spans.push(Span::raw(" ".repeat(pad as usize)));
+                    }
+                    spans.push(Span::styled(value, Style::default().fg(theme.muted)));
+                    lines.push(Line::from(spans));
+                }
+                // The account line, because the ApeKey is here and the account is
+                // the same question as the ApeKey.
+                lines.push(Line::default());
+                lines.push(super::results::account_line(app, theme));
+                lines.push(super::chrome::hint(HINT, theme));
+            }
+            View::Languages { base, size } => {
+                lines.extend(language_items(app, *base, *size));
+            }
+            View::Editor { row, text } => {
+                let (name, _) = row_value(app, *row);
+                lines.push(super::chrome::field(text, theme));
+                lines.push(Line::default());
+                lines.push(super::chrome::hint(&format!("editing {name}"), theme));
+                lines.push(super::chrome::hint(
+                    "enter saves · esc discards · tab or shift+tab to move the caret",
+                    theme,
+                ));
             }
         }
+        chrome.draw(lines, frame);
     }
 
     fn handle(&mut self, action: Action) -> Vec<Effect> {
@@ -173,6 +185,37 @@ impl Screen for Settings {
 }
 
 impl Settings {
+    /// What the window's title says.
+    ///
+    /// The row being edited, or the language being chosen, or just "settings" —
+    /// which is what tells a user which of three things they are looking at.
+    fn title(&self) -> &'static str {
+        match &self.view {
+            View::Rows => "settings",
+            View::Languages { .. } => "language",
+            View::Editor { .. } => "edit",
+        }
+    }
+
+    /// How tall this screen wants to be.
+    ///
+    /// Only as tall as its content: a settings window on a 40-row terminal that
+    /// fills all of it looks like a page, and a page is not what seven rows of
+    /// settings is.
+    fn height(&self, available: u16) -> u16 {
+        let wanted = match &self.view {
+            View::Rows => ROWS.len() as u16 + 3,
+            View::Languages { .. } => 0,
+            View::Editor { .. } => 5,
+        };
+        // The language browser fills whatever it is given, because it is a grid
+        // and a grid in a short box is just a truncated grid.
+        if wanted == 0 {
+            return available;
+        }
+        (wanted + 2).min(available)
+    }
+
     fn handle_rows(&mut self, action: Action) -> Vec<Effect> {
         let last = ROWS.len() - 1;
         let row = self.selected_row().unwrap_or(Row::Back);
@@ -343,56 +386,27 @@ fn max_len(row: Row) -> usize {
     }
 }
 
-fn editor_title(row: Row) -> &'static str {
-    match row {
-        Row::ApeKey => "ape key",
-        _ => "custom text",
-    }
-}
-
-/// What the editor is for, said where the user is looking.
-fn editor_help(row: Row) -> String {
-    match row {
-        Row::ApeKey => {
-            "reads: profile and personal bests. submissions need a browser login.".to_owned()
-        }
-        _ => "one passage per line, typed in full. the first line is the test.".to_owned(),
-    }
-}
-
-fn block_of(app: &App, frame: &mut Frame) -> Rect {
-    let theme = app.theme();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(" settings ", theme.heading()))
-        .style(theme.base());
-    let area = block.inner(frame.area());
-    frame.render_widget(block, frame.area());
-    area
-}
-
-/// The row list, with the selected row marked.
-fn row_items(app: &App, selected: usize) -> Vec<Line<'static>> {
-    let theme = app.theme();
-    let items: Vec<Line> = ROWS
+/// How wide the settings window wants to be.
+///
+/// Measured from the rows rather than guessed, because a guess is exactly how the
+/// values end up truncated: a settings window is read, not skimmed, and a value
+/// cut off at `auto (monkeytyp` is worse than no value.
+fn width_of(app: &App, available: u16) -> u16 {
+    // Two columns plus the marker in front of the selected row, four for the
+    // border, and a gap so the two columns do not touch.
+    let widest = ROWS
         .iter()
-        .enumerate()
-        .map(|(index, row)| {
+        .map(|row| {
             let (name, value) = row_value(app, *row);
-            let style = if index == selected {
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.foreground)
-            };
-            Line::from(vec![
-                Span::styled(format!("{name}  "), style),
-                Span::styled(value, Style::default().fg(theme.muted)),
-            ])
+            name.chars().count() + value.chars().count() + 4
         })
-        .collect();
-    items
+        .max()
+        .unwrap_or(40) as u16;
+    // The hint is a line of prose and it sets a floor: a window narrower than its
+    // own hint has a truncated hint, and a truncated hint looks like a sentence
+    // that simply stops.
+    let hint: u16 = HINT.chars().count() as u16 + 2;
+    widest.max(hint).min(available.saturating_sub(2).max(20))
 }
 
 /// A row's name and its current value.
@@ -538,13 +552,6 @@ fn size_label(size: u32) -> String {
     }
 }
 
-fn hint(theme: &crate::config::theme::Theme, text: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        format!(" {text} "),
-        Style::default().fg(theme.muted),
-    ))
-}
-
 /// The rows the bar already covers, which this screen deliberately omits.
 ///
 /// Not dead: the test on it is the thing that keeps a duplicate from being
@@ -563,6 +570,15 @@ const NOT_HERE: [Row; 5] = [
     Row::QuoteLength,
     Row::Blind,
 ];
+
+/// Every row's name and value, for anything that has to measure them.
+///
+/// The window's width is measured from the rows, which means the measurement has
+/// to see the same rows the window draws. Exposed rather than reimplemented: a
+/// test that reimplemented the rule would be testing its own copy of it.
+pub fn row_values(app: &App) -> Vec<(&'static str, String)> {
+    ROWS.iter().map(|row| row_value(app, *row)).collect()
+}
 
 #[cfg(test)]
 mod tests {
