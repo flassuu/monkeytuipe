@@ -51,6 +51,11 @@ pub struct TypingRows {
     pub words: Rect,
     pub chart: Rect,
     pub counters: Rect,
+    /// The row under the counters, for the hint that says which key starts a test.
+    ///
+    /// Empty when the screen is too short to spare one, in which case the hint is
+    /// drawn over the words instead. See [`rows_for`].
+    pub hint: Rect,
 }
 
 /// Splits a screen into the typing screen's bands.
@@ -59,6 +64,10 @@ pub struct TypingRows {
 /// fields the current mode has and how wide the terminal is — so it is measured
 /// from the cells rather than assumed. A bar given one row and needing two gets
 /// truncated, and a truncated settings bar hides settings.
+///
+/// `hint` is whether the hint that says which key starts a test is wanted at all —
+/// only true before the first keystroke, so the row it needs is not taken away from
+/// the words for the whole test.
 ///
 /// The words come first, because a test with no room for the words is a test you
 /// cannot see and the chart is decoration. So the chart is drawn out of what is
@@ -74,7 +83,14 @@ pub struct TypingRows {
 /// the screen and a bare line at the bottom is two different styles for two things
 /// that are both "where the state of the test is", and the mismatch reads as an
 /// accident rather than a decision.
-pub fn rows_for(area: Rect, bar_rows: u16) -> TypingRows {
+///
+/// The hint gets a row of its own, under the counters, **only if the words can spare
+/// one**. That is the whole negotiation: on a roomy screen the hint is a quiet line
+/// below the frame, where nothing is in the way of the words; on a cramped one it
+/// falls back to being drawn over the words, because the words are the test and the
+/// hint is a courtesy. A terminal too short for both is not a terminal where the
+/// words can be quietly deleted to make room for a sentence.
+pub fn rows_for(area: Rect, bar_rows: u16, hint: bool) -> TypingRows {
     let bottom = area.y + area.height;
 
     let header = Rect::new(area.x, area.y, area.width, 1.min(area.height));
@@ -88,15 +104,28 @@ pub fn rows_for(area: Rect, bar_rows: u16) -> TypingRows {
 
     // Two rules and the line between them, and never more than the screen has.
     let counters_height = COUNTER_ROWS.min(area.height);
+    // What is left between the bar and the counters, which is what the hint and the
+    // words have between them.
+    let free = bottom
+        .saturating_sub(cursor)
+        .saturating_sub(counters_height);
+    let hint_rows = if hint && free > MIN_WORD_ROWS { 1 } else { 0 };
+
+    let hint = Rect::new(
+        area.x,
+        bottom.saturating_sub(hint_rows),
+        area.width,
+        hint_rows,
+    );
     let counters = Rect::new(
         area.x,
-        bottom.saturating_sub(counters_height),
+        bottom
+            .saturating_sub(hint_rows)
+            .saturating_sub(counters_height),
         area.width,
         counters_height,
     );
-    let free = bottom
-        .saturating_sub(cursor)
-        .saturating_sub(counters.height);
+    let free = free.saturating_sub(hint_rows);
 
     let wants_chart = free >= MIN_WORD_ROWS + CHART_ROWS + 2 * GAP;
     let chart_height = if wants_chart { CHART_ROWS } else { 0 };
@@ -117,6 +146,7 @@ pub fn rows_for(area: Rect, bar_rows: u16) -> TypingRows {
         words,
         chart,
         counters,
+        hint,
     }
 }
 
@@ -132,18 +162,26 @@ impl Screen for Typing {
         let theme = app.theme();
         frame.render_widget(Paragraph::new("").style(theme.base()), frame.area());
 
-        let rows = rows_for(frame.area(), bar_rows(app, frame.area().width));
-        render_header(app, frame, rows.header, theme);
-        topbar::render(app, rows.bar, theme, frame);
         // The site's out-of-focus warning, which in a terminal is the one before a
         // test has started: the words are there, and something says that a key is
         // what starts them. The words are drawn dimmed rather than covered, so
         // they are still readable — a user about to type them should not be stopped
         // from reading ahead.
         let awaiting = !app.test().is_started();
+        let rows = rows_for(frame.area(), bar_rows(app, frame.area().width), awaiting);
+        render_header(app, frame, rows.header, theme);
+        topbar::render(app, rows.bar, theme, frame);
         let below = render_words(app, frame, rows.words, theme);
         if awaiting {
-            render_awaiting_key(app, frame, rows.words, below, theme);
+            if rows.hint.height > 0 {
+                // Its own row, under the counters: the hint is a sentence about the
+                // keyboard, and the words are a sentence to be typed, and the
+                // keyboard hint does not belong among the words.
+                render_awaiting_key(app, frame, rows.hint, rows.hint.y, theme);
+            } else {
+                // No room for a row, so it goes over the words as it always did.
+                render_awaiting_key(app, frame, rows.words, below, theme);
+            }
         }
         render_chart(app, frame, rows.chart, theme);
         render_counters(app, frame, rows.counters, theme);

@@ -10,7 +10,7 @@ use ratatui::Terminal;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::Rect;
 
 use monkeytuipe::app::App;
@@ -57,8 +57,17 @@ fn area_text(buffer: &Buffer, area: Rect) -> String {
 }
 
 /// The screen's own layout, so a test and the screen agree on where things are.
+///
+/// The hint flag is the same one the screen passes: true only before the first
+/// keystroke, because that is the only time the hint is on screen at all. Passing it
+/// from the app rather than hard-coding it means a test cannot accidentally ask for
+/// a layout the screen would never use.
 fn layout_of(app: &App, buffer: &Buffer) -> monkeytuipe::screens::typing::TypingRows {
-    rows_for(buffer.area, bar_rows(app, buffer.area.width))
+    rows_for(
+        buffer.area,
+        bar_rows(app, buffer.area.width),
+        !app.test().is_started(),
+    )
 }
 
 fn app() -> App {
@@ -1150,6 +1159,121 @@ fn the_hint_survives_a_terminal_with_no_room_for_a_row() {
         assert!(
             all.iter().any(|line| line.contains("press shift+enter")),
             "no hint on a {width}x{height} terminal: {all:?}"
+        );
+    }
+}
+
+/// The hint is a row of its own, under the counters box.
+///
+/// It used to sit on the row below the words, which put a sentence about the keyboard
+/// directly under a sentence to be typed — the two are about different things, and
+/// the second is the test. Under the frame it is quiet: the words, then the numbers,
+/// then the hint, in that order of importance.
+#[test]
+fn the_hint_has_its_own_row_under_the_counters() {
+    let app = in_mode(monkeytuipe::config::Mode::Time);
+    let buffer = render(&app, 100, 20);
+    let rows = layout_of(&app, &buffer);
+
+    assert_eq!(rows.hint.height, 1, "the hint has no row of its own");
+    assert_eq!(
+        rows.hint.y,
+        rows.counters.y + rows.counters.height,
+        "the hint is not directly under the counters"
+    );
+    // And the counters are above it, not below: the hint is the last thing on screen.
+    assert_eq!(
+        rows.hint.y + rows.hint.height,
+        buffer.area.y + buffer.area.height,
+        "something is under the hint"
+    );
+    // The words do not reach it.
+    assert!(
+        rows.words.y + rows.words.height <= rows.counters.y,
+        "the words and the counters overlap"
+    );
+
+    let on_screen: Vec<String> = lines(&buffer);
+    assert!(
+        on_screen[rows.hint.y as usize].contains("press shift+enter"),
+        "the hint is not on its own row: {on_screen:?}"
+    );
+}
+
+/// Once the test has started there is no hint, so the row goes back to the words.
+///
+/// The row is reserved only while the hint is wanted. Reserving it for the whole test
+/// would shrink the words for as long as the test ran, to hold a sentence that is
+/// only true before the first keystroke.
+#[test]
+fn the_row_is_the_words_again_once_the_test_starts() {
+    let mut app = in_mode(monkeytuipe::config::Mode::Time);
+    let before = {
+        let buffer = render(&app, 100, 20);
+        layout_of(&app, &buffer).words.height
+    };
+    app.press_with(KeyCode::Enter, KeyModifiers::SHIFT);
+    app.press(KeyCode::Char('t'));
+
+    let buffer = render(&app, 100, 20);
+    let rows = layout_of(&app, &buffer);
+    assert_eq!(
+        rows.hint.height, 0,
+        "a row is still held for a hint nobody sees"
+    );
+    assert_eq!(
+        rows.counters.y + rows.counters.height,
+        20,
+        "the counters moved"
+    );
+    assert_eq!(
+        rows.words.height,
+        before + 1,
+        "the words did not get the hint's row back"
+    );
+    let on_screen: Vec<String> = lines(&buffer);
+    assert!(
+        !on_screen.iter().any(|l| l.contains("press shift+enter")),
+        "the hint is still on screen: {on_screen:?}"
+    );
+}
+
+/// And when there is not room to spare it, the words keep their rows and the hint goes
+/// over the last of them — the old arrangement, which is the only one that fits.
+///
+/// A terminal with no row to give is not a terminal where the words should be
+/// quietly deleted to make room for a sentence about the keyboard.
+#[test]
+fn the_words_outrank_the_hint_when_there_is_no_room() {
+    for (width, height) in [(44u16, 8u16), (30, 6), (24, 5)] {
+        let app = in_mode(monkeytuipe::config::Mode::Time);
+        let buffer = render(&app, width, height);
+        let rows = layout_of(&app, &buffer);
+        let all = lines(&buffer);
+        assert!(
+            all.iter().any(|l| l.contains("press shift+enter")),
+            "no hint on a {width}x{height} terminal: {all:?}"
+        );
+        // A row of its own, or nothing to argue about. A *single* word row is also
+        // nothing to argue about: the hint and the words are competing for one row and
+        // the hint wins it, exactly as it did before there was a hint row at all. That
+        // is only reachable on a screen where the header and the framed counters have
+        // taken four of the five rows, and at that size the bar itself is not drawn
+        // either.
+        if rows.hint.height > 0 || rows.words.height < 2 {
+            continue;
+        }
+        // Otherwise the words must still be there. Checked against the words band
+        // rather than a known word, because the word list is generated.
+        let wordy = all
+            .iter()
+            .take((rows.words.y + rows.words.height) as usize)
+            .skip(rows.words.y as usize)
+            .filter(|line| !line.trim().is_empty() && !line.contains("press shift+enter"))
+            .count();
+        assert!(
+            wordy > 0,
+            "the hint took the words' rows on {width}x{height}: {all:?}"
         );
     }
 }
