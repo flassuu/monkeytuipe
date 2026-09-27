@@ -100,6 +100,32 @@ impl Mode {
             Self::Input => "INS",
         }
     }
+
+    /// Whether a plain letter is *text* rather than a command, in this mode on
+    /// this surface.
+    ///
+    /// This is the predicate that was missing, and it is why navigation on the
+    /// main screen did not work.
+    ///
+    /// [`Surface::types_letters`] asked only about the surface, so the typing
+    /// screen said yes in *every* mode — and in control mode `h`, `j`, `k` and `l`
+    /// were still the first four letters of the next word. There was no way to
+    /// drive the bar from the typing screen at all, because the one screen with a
+    /// bar was the one screen where letters could not be commands.
+    ///
+    /// The screen and the mode are two different questions and the answer is their
+    /// conjunction: a *field* always owns its letters, because there is somewhere
+    /// for them to go; a *test* owns them only in typing mode, because in control
+    /// mode the keyboard is the user interface rather than the input.
+    pub fn owns_letters(self, surface: Surface) -> bool {
+        match surface {
+            // A field is a field in either mode. There is no control-mode way to
+            // type a space into the word-count box, and there should not be.
+            Surface::Editing => true,
+            Surface::Typing => self == Self::Input,
+            Surface::Browsing => false,
+        }
+    }
 }
 
 /// A key, reduced to the few facts the mode rules care about.
@@ -228,6 +254,17 @@ impl Direction {
     }
 }
 
+/// The keys that switch mode, as the interface spells them.
+///
+/// The one place this string is written down. The mode layer decides what the key
+/// *means* and the typing screen's overlay says what to *press*, and if those were
+/// two literals then correcting one would leave the other telling a user to press
+/// a key that does nothing — which is the worst thing a hint can do.
+///
+/// It is not in the keybind table on purpose: [`intent`] is the only answer to
+/// "what does this key mean", and a table underneath it would be a second answer.
+pub const SWITCH_KEYS: &str = "shift+enter";
+
 /// Decides what a key means.
 ///
 /// The three inputs are everything there is to know: which mode the app is in,
@@ -265,11 +302,16 @@ pub fn intent(key: Key, mode: Mode, surface: Surface, window_open: bool) -> Inte
         };
     }
 
-    // Shift+Enter is a command everywhere, not a character: it ends a zen test.
+    // Shift+Enter switches mode, everywhere, and is nothing else.
+    //
+    // It used to be reserved for ending a zen test, which meant the one key the
+    // user is asked to press to *start* typing was also a key that could end a
+    // test. A key that means one thing in one place and another in the next is
+    // the definition of a key nobody can press with confidence. Zen ends on `esc`
+    // instead, at the bottom of the existing escape stack.
     if key.code == KeyCode::Enter && key.shift {
-        return Intent::Nothing;
+        return Intent::Switch;
     }
-
     // Tab is a mode switch only where skipping a word would be meaningless. On the
     // typing screen it is *skip*, and taking it away would break the one command
     // every monkeytype user knows.
@@ -289,12 +331,16 @@ pub fn intent(key: Key, mode: Mode, surface: Surface, window_open: bool) -> Inte
     // file: it would not look like a broken keybinding, it would look like a
     // keyboard that drops characters. Inside a field it is a letter like any
     // other.
-    if key.is_char('i') && !window_open && mode == Mode::Navigation && !surface.types_letters() {
+    //
+    // Note what decides this: the *mode*, not the surface. In control mode on the
+    // typing screen a letter is not text — the keyboard is the interface — so `i`
+    // opens the command window there, and in typing mode it types an `i`.
+    if key.is_char('i') && !window_open && mode == Mode::Navigation && !mode.owns_letters(surface) {
         return Intent::OpenInput;
     }
 
     // In input mode everything printable is the field's.
-    if window_open || mode == Mode::Input {
+    if window_open || mode.owns_letters(surface) {
         return match key.code {
             KeyCode::Char(c) => Intent::Text(c),
             _ => Intent::Nothing,
@@ -302,8 +348,10 @@ pub fn intent(key: Key, mode: Mode, surface: Surface, window_open: bool) -> Inte
     }
 
     // Navigation, no window. The vim keys, on a surface where letters are not
-    // text.
-    if !surface.types_letters() {
+    // text — which now includes the typing screen in control mode, and that is
+    // the whole point: the bar is on the typing screen, so the bar is reachable
+    // with the same keys on the same screen.
+    {
         let direction = match key.letter() {
             Some('k') => Some(Direction::Up),
             Some('j') => Some(Direction::Down),
@@ -317,7 +365,7 @@ pub fn intent(key: Key, mode: Mode, surface: Surface, window_open: bool) -> Inte
     }
 
     match key.code {
-        KeyCode::Char(c) if !surface.types_letters() => Intent::Command(c.to_ascii_lowercase()),
+        KeyCode::Char(c) if !mode.owns_letters(surface) => Intent::Command(c.to_ascii_lowercase()),
         KeyCode::Char(c) => Intent::Text(c),
         _ => Intent::Nothing,
     }
@@ -361,30 +409,71 @@ mod tests {
         );
     }
 
-    /// And on the typing screen it is text in both modes, because a typist has to
+    /// On the typing screen a letter is text in *typing* mode, and a typist has to
     /// be able to type `t`, `,` and `q`.
     #[test]
-    fn the_typing_screen_never_takes_a_letter_as_a_command() {
-        for mode in [Mode::Navigation, Mode::Input] {
-            for c in ['t', ',', 'q', 'j', 'k', 'h', 'l', 'i'] {
-                let got = what(letter(c), mode, Surface::Typing, false);
-                assert!(
-                    matches!(got, Intent::Text(ch) if ch == c),
-                    "{c} in {mode:?} on the typing screen was {got:?}"
-                );
-            }
+    fn the_typing_screen_takes_a_letter_as_text_in_typing_mode() {
+        for c in ['t', ',', 'q', 'j', 'k', 'h', 'l', 'i'] {
+            let got = what(letter(c), Mode::Input, Surface::Typing, false);
+            assert!(
+                matches!(got, Intent::Text(ch) if ch == c),
+                "{c} in typing mode on the typing screen was {got:?}"
+            );
         }
     }
 
-    /// Which means the vim keys do not move anything there, and that is right:
-    /// `h` moving the selection is worth less than `h` being typeable.
+    /// And in *control* mode on the same screen it is a command. This is the fix.
+    ///
+    /// It used to be text in both modes, because the rules asked only about the
+    /// surface — and so the one screen with a settings bar was the one screen
+    /// where no letter could be a command. There was no mode you could reach the
+    /// bar from, which is what "navigation on the main screen does not work" meant
+    /// all along.
+    #[test]
+    fn control_mode_on_the_typing_screen_takes_a_letter_as_a_command() {
+        // The four vim letters are excluded: they *move*, which is the whole reason
+        // control mode is worth having, and
+        // `the_typing_screen_does_move_the_selection_with_hjkl_in_control_mode`
+        // is where they are pinned. `i` is excluded too, because in control mode it
+        // opens the command window — which is correct, and is the point: a letter
+        // that is not text is available to be a command.
+        for c in ['t', ',', 'q'] {
+            let got = what(letter(c), Mode::Navigation, Surface::Typing, false);
+            assert!(
+                matches!(got, Intent::Command(ch) if ch == c),
+                "{c} in control mode on the typing screen was {got:?}"
+            );
+        }
+    }
+
+    /// So the vim keys *do* move the bar there, which is the point of control mode
+    /// being reachable from the main screen at all.
+    #[test]
+    fn the_typing_screen_does_move_the_selection_with_hjkl_in_control_mode() {
+        for (c, direction) in [
+            ('h', Direction::Left),
+            ('j', Direction::Down),
+            ('k', Direction::Up),
+            ('l', Direction::Right),
+        ] {
+            assert_eq!(
+                what(letter(c), Mode::Navigation, Surface::Typing, false),
+                Intent::Move(direction),
+                "{c} in control mode did not move the bar"
+            );
+        }
+    }
+
+    /// And they still do *not* move it in typing mode, where they are the first
+    /// four letters of the next word. `h` moving the selection is worth less than
+    /// `h` being typeable, and that has not changed.
     #[test]
     fn the_typing_screen_does_not_move_the_selection_with_hjkl() {
         for c in ['h', 'j', 'k', 'l'] {
-            let got = what(letter(c), Mode::Navigation, Surface::Typing, false);
+            let got = what(letter(c), Mode::Input, Surface::Typing, false);
             assert!(
-                !matches!(got, Intent::Move(_)),
-                "{c} moved the selection on the typing screen: {got:?}"
+                matches!(got, Intent::Text(ch) if ch == c),
+                "{c} in typing mode moved the selection: {got:?}"
             );
         }
     }
@@ -493,12 +582,15 @@ mod tests {
     /// in the language and it is not a command.
     #[test]
     fn i_is_a_letter_on_the_typing_screen() {
+        // In typing mode, on the typing screen: `i` is the seventh most common
+        // letter in the language and it is typed.
         assert_eq!(
-            what(letter('i'), Mode::Navigation, Surface::Typing, false),
+            what(letter('i'), Mode::Input, Surface::Typing, false),
             Intent::Text('i'),
             "i opened the command window instead of being typed"
         );
-        // And in an editor, which is also a field.
+        // And in an editor, which is also a field — in *either* mode, because a
+        // field has somewhere to put a letter and the mode does not change that.
         assert_eq!(
             what(letter('i'), Mode::Navigation, Surface::Editing, false),
             Intent::Text('i')
@@ -575,14 +667,40 @@ mod tests {
         );
     }
 
-    /// Shift+Enter is the way out of a zen test and a letter nowhere. It is left
-    /// to the keybind table rather than being a mode's job.
+    /// Shift+Enter switches mode, in every mode, on every surface, with no window
+    /// and with one. It is the one key with one meaning.
+    ///
+    /// It used to be the way out of a zen test, which meant the key the typing
+    /// screen *tells you to press to start typing* was also a key that could end a
+    /// test. A key that means one thing in one place and another in the next is a
+    /// key nobody can press on purpose, and this is the key the user is asked for
+    /// first. Zen ends on `esc` now.
     #[test]
-    fn shift_enter_is_left_to_the_bindings() {
+    fn shift_enter_switches_mode_everywhere() {
         let key = Key::with(KeyCode::Enter, false, false, true);
         for mode in [Mode::Navigation, Mode::Input] {
-            assert_eq!(what(key, mode, Surface::Typing, false), Intent::Nothing);
+            for surface in [Surface::Typing, Surface::Editing, Surface::Browsing] {
+                for window in [false, true] {
+                    assert_eq!(
+                        what(key, mode, surface, window),
+                        Intent::Switch,
+                        "shift+enter on {surface:?} in {mode:?} (window: {window})"
+                    );
+                }
+            }
         }
+    }
+
+    /// And the hint names the same key the rules match on, so the overlay cannot
+    /// tell a user to press something inert.
+    #[test]
+    fn the_switch_hint_names_the_key_the_rules_match() {
+        assert_eq!(SWITCH_KEYS, "shift+enter");
+        let key = Key::with(KeyCode::Enter, false, false, true);
+        assert_eq!(
+            what(key, Mode::Navigation, Surface::Typing, false),
+            Intent::Switch
+        );
     }
 
     /// Every mode, every surface, every key: nothing panics and nothing falls out

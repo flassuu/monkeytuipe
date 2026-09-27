@@ -142,12 +142,21 @@ impl Screen for Typing {
             Action::Char(c) => vec![Effect::Type(c)],
             Action::Backspace => vec![Effect::Backspace],
             Action::Skip => vec![Effect::SkipWord],
-            // The arrows drive the settings bar, which is always on screen, so
-            // there is no mode to enter first. That is the trade the website
-            // makes with a mouse click and a terminal makes with a key that was
-            // doing nothing anyway.
-            Action::Up => vec![Effect::ChangeBar(-1)],
-            Action::Down => vec![Effect::ChangeBar(1)],
+            // The bar is one row, so it has no vertical axis: up and down mean
+            // nothing here, and that is the correct answer rather than a missing
+            // one.
+            //
+            // They used to mean `ChangeBar`, which is not a move at all — it
+            // *applies* the selected field. So `j` in control mode advanced the
+            // test mode one step per press, and three presses turned a time test
+            // into a zen test with punctuation and numbers forced off. The user
+            // found it by pressing a navigation key and watching the words change
+            // shape. A key whose job is to move a highlight must never change a
+            // setting, or "navigate" becomes "reconfigure", and there is no undo.
+            Action::Up | Action::Down => Vec::new(),
+            // Left and right move between fields, which is the bar's only axis. The
+            // site uses a mouse click for the same thing; a terminal uses the arrow
+            // that points where the next field is.
             Action::Left => vec![Effect::MoveBar(-1)],
             Action::Right => vec![Effect::MoveBar(1)],
             // Enter presses the selected bar button and every change takes effect
@@ -475,9 +484,12 @@ fn active_word(word: &Word, theme: Theme, zen: bool) -> Vec<Span<'static>> {
 /// answer, and an overlay over a test in progress is a thing in the way of the one
 /// thing the screen is for.
 ///
-/// It says *press any key* rather than "click here", because there is no click —
-/// and *any* key, because that is true: every printable key starts the test, and
-/// so does a space, which is what someone who has read the words will press first.
+/// It says which key to press, and that key is the one that switches mode —
+/// [`crate::screens::modes::SWITCH_KEYS`], the same constant the mode rules match
+/// on. It used to say "press any key", which was true of the old design and is
+/// false of this one: in control mode the arrow keys and `hjkl` drive the bar and
+/// letters are commands, so a user who takes "any key" at its word presses `j`,
+/// moves the bar, and learns that the words are not being typed.
 fn render_awaiting_key(app: &App, frame: &mut Frame, area: Rect, below: u16, theme: Theme) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -489,8 +501,11 @@ fn render_awaiting_key(app: &App, frame: &mut Frame, area: Rect, below: u16, the
         area.y + area.height.saturating_sub(1)
     };
     let at = Rect::new(area.x, line, area.width, 1);
+    let text = app
+        .tr(crate::i18n::Key::PressAnyKey)
+        .replace("{}", crate::screens::modes::SWITCH_KEYS);
     frame.render_widget(
-        Paragraph::new(app.tr(crate::i18n::Key::PressAnyKey))
+        Paragraph::new(text)
             .style(Style::default().fg(theme.muted))
             .alignment(Alignment::Center),
         at,

@@ -258,9 +258,11 @@ strings! {
     LanguageBrowser      => ["choose a language", "выберите язык"],
     BaseColumn           => ["base",        "основа"],
     // ---- the typing screen ---------------------------------------------
+    // The `{}` is the key that switches mode, filled in from
+    // `modes::SWITCH_KEYS` so the hint cannot name a key that does nothing.
     PressAnyKey          => [
-        "press any key to start typing",
-        "нажмите любую клавишу, чтобы начать",
+        "press {} to enter a typing mode",
+        "нажмите {}, чтобы включить режим набора",
     ],
     StartedHints         => [
         "tab skip · ctrl+r restart · esc commands · f2 settings",

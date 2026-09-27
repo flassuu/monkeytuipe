@@ -841,18 +841,20 @@ impl App {
 
     /// Switches mode.
     ///
-    /// Going to input mode without a window is the app's problem to fix rather
-    /// than the caller's: a mode that says "keys are text" with no field to put
-    /// them in is a mode that eats letters, which is the one thing input mode must
-    /// never do.
+    /// This does *not* open or close the command window, and that is the fix for
+    /// "the two modes do not exist on the main screen".
+    ///
+    /// It used to: `Input` forced a window open and `Navigation` closed it, so
+    /// `Focus` was not a mode at all but a second name for "the command window is
+    /// showing". Typing mode therefore had nowhere to be *without* a dialog over
+    /// the test, and the mode the status line reported was a fact about a window
+    /// rather than about the keyboard.
+    ///
+    /// Now the two are separate: the mode says what a key means, the window is
+    /// just a window. `Intent::OpenInput` and `Intent::CloseInput` are the only
+    /// things that touch `self.input`, so it has one owner.
     pub fn set_mode(&mut self, mode: Focus) {
         self.mode = mode;
-        if mode == Focus::Input && self.input.is_none() {
-            self.input = Some(input::Window::new(input::Reason::Command));
-        }
-        if mode == Focus::Navigation {
-            self.input = None;
-        }
     }
 
     /// The input window, if it is open.
@@ -1280,9 +1282,20 @@ impl App {
     /// check that a screen really drops a key rather than only that its `handle`
     /// returns nothing.
     pub fn press(&mut self, code: KeyCode) -> bool {
+        self.press_with(code, KeyModifiers::NONE)
+    }
+
+    /// [`App::press`] with modifiers, for the keys that are only a key *with* a
+    /// modifier.
+    ///
+    /// `shift+enter` is the mode switch, so an outside test that wants to reach the
+    /// typing mode has no other way in. Adding a second method rather than a
+    /// parameter on the first, because `press` is called from several hundred test
+    /// lines and every one of them means "no modifiers".
+    pub fn press_with(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         self.on_key(KeyEvent {
             code,
-            modifiers: KeyModifiers::NONE,
+            modifiers,
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         })
@@ -1914,6 +1927,21 @@ impl App {
 
     /// Hands an action to the screen and applies what comes back.
     fn on_action(&mut self, action: Action) -> anyhow::Result<bool> {
+        // The bottom of the escape stack: a live zen test, which has no length and
+        // so has nothing to run out of. `esc` ends it here, before any screen gets
+        // to ask what `esc` means to it.
+        //
+        // This used to be shift+enter, which is now the key that switches mode. A
+        // key that ends a test in one state and switches modes in the others is a
+        // key nobody can press with confidence, and the user is *told* to press it
+        // to start typing — so it had to be the one key in the app with a single
+        // meaning.
+        if action == Action::Back && self.test.mode() == Mode::Zen && self.test.is_running() {
+            self.test.finish();
+            self.settle();
+            return Ok(false);
+        }
+
         let effects = match &mut self.screen {
             ScreenState::Typing(screen) => screen.handle(action),
             ScreenState::Settings(screen) => screen.handle(action),
@@ -2078,6 +2106,29 @@ mod tests {
             state: KeyEventState::NONE,
         }
     }
+    /// An app already in **typing** mode, for the tests that press letters.
+    ///
+    /// The app opens in control mode — the user is told to press
+    /// [`crate::screens::modes::SWITCH_KEYS`] to start typing, so control is where
+    /// a session begins. A test about a letter being typed therefore has to say it
+    /// is in typing mode, and saying so is the point: which mode a key means in is
+    /// now part of the setup rather than an ambient fact about the screen.
+    fn typing() -> App {
+        let mut app = app();
+        app.set_mode(Focus::Input);
+        app
+    }
+
+    /// Everything typed so far, as one string, for a test about what a key *was*.
+    fn typed(app: &App) -> String {
+        app.test()
+            .words()
+            .iter()
+            .map(|word| word.input())
+            .collect::<Vec<_>>()
+            .concat()
+    }
+
     fn press_mod(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent {
             code,
@@ -2088,7 +2139,15 @@ mod tests {
     }
 
     /// Sends a string of keystrokes through the real key path.
+    /// Presses every character of `text` through the real key path.
+    ///
+    /// It switches to typing mode first, because that is the mode in which a
+    /// character *is* text. A helper whose whole job is to type should not have to
+    /// be told which mode makes typing possible — and a test that pressed letters
+    /// in control mode and found they became commands was testing the wrong thing
+    /// while looking like it tested the right thing.
     fn type_text(app: &mut App, text: &str) {
+        app.set_mode(Focus::Input);
         for c in text.chars() {
             app.on_key(press(KeyCode::Char(c))).expect("no io");
         }
@@ -2114,7 +2173,7 @@ mod tests {
 
     #[test]
     fn a_bare_letter_is_text_on_the_typing_screen_even_if_it_is_bound() {
-        let mut app = app();
+        let mut app = typing();
         // Bind `q` to quit in the user's own config, as older versions did.
         app.config.keybinds.quit = vec!["q".into()];
         app.on_key(press(KeyCode::Char('q'))).expect("no io");
@@ -2321,7 +2380,7 @@ mod tests {
 
     #[test]
     fn a_bound_key_is_typed_while_a_test_runs() {
-        let mut app = app();
+        let mut app = typing();
         app.on_key(press(KeyCode::Char('q'))).expect("no io");
         assert!(app.test().is_started());
         assert_eq!(app.test().active_word().input(), "q");
@@ -3025,32 +3084,182 @@ mod tests {
         assert_eq!(app.countdown(), "2w");
     }
 
-    /// Shift+Enter is the only way out of a zen test.
+    /// `esc` is the only way out of a zen test, because a zen test has no length
+    /// and so nothing to run out of.
+    ///
+    /// It used to be shift+enter. That key is now the mode switch — the key the
+    /// typing screen's overlay tells the user to press to start typing — and a key
+    /// that ends a test in one state and switches modes in the others cannot be
+    /// pressed with confidence.
     #[test]
-    fn shift_enter_finishes_a_zen_test() {
+    fn esc_finishes_a_zen_test() {
         let mut app = app_with_test(crate::config::Mode::Zen);
         for c in "one two ".chars() {
             app.type_char(c);
         }
         assert!(!app.test().is_finished());
-        app.on_key(press_mod(KeyCode::Enter, KeyModifiers::SHIFT))
-            .expect("no io");
-        assert!(app.test().is_finished(), "shift+enter did not finish zen");
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert!(app.test().is_finished(), "esc did not finish zen");
         assert_eq!(app.screen_kind(), ScreenKind::Results);
     }
 
-    /// And it does nothing in a test that ends on its own, where a stray
-    /// shift+enter would end a test the user was still in the middle of.
+    /// And shift+enter no longer ends anything, in a zen test or any other: it is
+    /// the mode switch and only the mode switch. A key with two meanings is a key
+    /// nobody can press on purpose.
     #[test]
-    fn shift_enter_does_nothing_outside_zen() {
-        let mut app = app_with_test(crate::config::Mode::Time);
-        app.set_elapsed(Duration::from_millis(500));
-        for c in "hello ".chars() {
-            app.type_char(c);
+    fn shift_enter_switches_mode_and_ends_nothing() {
+        let mut zen = app_with_test(crate::config::Mode::Zen);
+        for c in "one two ".chars() {
+            zen.type_char(c);
         }
+        zen.on_key(press_mod(KeyCode::Enter, KeyModifiers::SHIFT))
+            .expect("no io");
+        assert!(!zen.test().is_finished(), "shift+enter ended a zen test");
+        assert_eq!(zen.mode(), Focus::Input, "shift+enter did not switch mode");
+
+        let mut timed = app_with_test(crate::config::Mode::Time);
+        timed.set_elapsed(Duration::from_millis(500));
+        for c in "hello ".chars() {
+            timed.type_char(c);
+        }
+        timed
+            .on_key(press_mod(KeyCode::Enter, KeyModifiers::SHIFT))
+            .expect("no io");
+        assert!(
+            !timed.test().is_finished(),
+            "shift+enter ended a timed test"
+        );
+    }
+
+    /// The mode switch goes both ways, and it is a mode rather than a window.
+    ///
+    /// It used to be a synonym for "the command window is open": `set_mode(Input)`
+    /// forced the window up and `set_mode(Navigation)` closed it, so there was no
+    /// such thing as being in typing mode on the main screen. This asserts both
+    /// halves — the mode changes, and no dialog appears.
+    #[test]
+    fn shift_enter_switches_mode_without_opening_a_window() {
+        let mut app = app();
+        assert_eq!(app.mode(), Focus::Navigation);
+        assert!(!app.input_is_open());
+
         app.on_key(press_mod(KeyCode::Enter, KeyModifiers::SHIFT))
             .expect("no io");
-        assert!(!app.test().is_finished(), "shift+enter ended a timed test");
+        assert_eq!(app.mode(), Focus::Input, "the key did not switch mode");
+        assert!(
+            !app.input_is_open(),
+            "switching mode opened the command window; the two are not the same thing"
+        );
+
+        app.on_key(press_mod(KeyCode::Enter, KeyModifiers::SHIFT))
+            .expect("no io");
+        assert_eq!(app.mode(), Focus::Navigation, "the key did not switch back");
+        assert!(!app.input_is_open());
+    }
+
+    /// In control mode the four vim letters are the interface, not the text. This
+    /// is the whole point of the two modes and it could not be true before: the
+    /// typing screen asked only about the *surface*, so it claimed every letter in
+    /// every mode and there was no way to drive the bar from the screen that has
+    /// a bar.
+    #[test]
+    fn the_vim_letters_are_text_in_typing_mode_and_commands_in_control_mode() {
+        let mut typing = app();
+        typing
+            .on_key(press_mod(KeyCode::Enter, KeyModifiers::SHIFT))
+            .expect("no io");
+        for c in "hjkl".chars() {
+            typing.on_key(press(KeyCode::Char(c))).expect("no io");
+        }
+        assert_eq!(typed(&typing), "hjkl", "the letters were not typed");
+
+        let mut control = app();
+        for _ in 0..2 {
+            control
+                .on_key(press_mod(KeyCode::Enter, KeyModifiers::SHIFT))
+                .expect("no io");
+        }
+        for c in "hjkl".chars() {
+            control.on_key(press(KeyCode::Char(c))).expect("no io");
+        }
+        assert_eq!(typed(&control), "", "a control-mode letter was typed");
+    }
+
+    /// A navigation key must never change a setting. This is the bug the two modes
+    /// exposed: up and down on the typing screen were bound to the same effect as
+    /// "press the selected bar button", so `j` advanced the test mode one step per
+    /// press, and three presses in control mode turned a timed test into a zen one
+    /// with punctuation and numbers forced off. Navigating is not reconfiguring,
+    /// and there is no undo.
+    #[test]
+    fn a_navigation_key_never_changes_the_test() {
+        let mut app = app();
+        for _ in 0..2 {
+            app.on_key(press_mod(KeyCode::Enter, KeyModifiers::SHIFT))
+                .expect("no io");
+        }
+        let before = (
+            app.test_mode(),
+            app.config.test.punctuation,
+            app.config.test.numbers,
+        );
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+        ] {
+            app.on_key(press(code)).expect("no io");
+        }
+        assert_eq!(
+            (
+                app.test_mode(),
+                app.config.test.punctuation,
+                app.config.test.numbers
+            ),
+            before,
+            "navigating changed the test"
+        );
+    }
+
+    /// The same keys move the bar's selection, which is the thing they are for.
+    #[test]
+    fn left_and_right_walk_the_bar_in_control_mode() {
+        let mut app = app();
+        for _ in 0..2 {
+            app.on_key(press_mod(KeyCode::Enter, KeyModifiers::SHIFT))
+                .expect("no io");
+        }
+        let start = app.bar().selected;
+        app.on_key(press(KeyCode::Right)).expect("no io");
+        let right = app.bar().selected;
+        assert_ne!(right, start, "right did not move the bar");
+        app.on_key(press(KeyCode::Left)).expect("no io");
+        assert_eq!(app.bar().selected, start, "left did not move back");
+    }
+
+    /// The overlay names the key that switches mode, and it names the one the mode
+    /// rules actually match on. A hint that names a key which does nothing is
+    /// worse than no hint, because it is a hint.
+    #[test]
+    fn the_overlay_names_the_key_that_switches_mode() {
+        use crate::screens::modes::SWITCH_KEYS;
+        let text = self::app().tr(crate::i18n::Key::PressAnyKey);
+        assert!(
+            text.contains("{}"),
+            "the overlay has no slot for the key: {text:?}"
+        );
+        let filled = text.replace("{}", SWITCH_KEYS);
+        assert!(filled.contains(SWITCH_KEYS), "{filled:?}");
+        // And the constant is not a lie: this key switches the mode.
+        let mut real = app();
+        real.on_key(press_mod(KeyCode::Enter, KeyModifiers::SHIFT))
+            .expect("no io");
+        assert_eq!(
+            real.mode(),
+            Focus::Input,
+            "{SWITCH_KEYS} does not switch mode"
+        );
     }
 
     #[test]
@@ -3461,10 +3670,11 @@ mod tests {
     #[test]
     fn tab_is_skip_on_the_typing_screen_and_a_mode_switch_elsewhere() {
         let mut app = app();
+        let mode_before = app.mode();
         app.on_key(press(KeyCode::Tab)).expect("no io");
         assert_eq!(
             app.mode(),
-            Focus::Navigation,
+            mode_before,
             "tab took the keyboard on the typing screen"
         );
         assert!(!app.input_is_open());
@@ -3477,7 +3687,14 @@ mod tests {
             Focus::Input,
             "tab did not switch on the settings screen"
         );
-        assert!(app.input_is_open());
+        // Switching mode does not open a window. It used to: `set_mode(Input)`
+        // forced the command window up, so the mode was a second name for the
+        // window and there was no such thing as typing mode without a dialog over
+        // the test. `i` is what opens the window.
+        assert!(
+            !app.input_is_open(),
+            "the mode switch opened the command window; they are not the same thing"
+        );
     }
 
     /// `i` enters input mode, the way it does in vim — and only where a letter is
