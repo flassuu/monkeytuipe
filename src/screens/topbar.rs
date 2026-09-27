@@ -65,39 +65,78 @@ impl Block {
 
 /// The Nerd Font glyph in front of each kind of button.
 ///
-/// Eight, because the bar has eight kinds of button the user has to tell apart at a
-/// glance: the two toggles, the five modes, and the wrench. The length card gets
-/// none — `15 30 60 120` is a row of numbers and a glyph in front of each one would
-/// be eight glyphs saying nothing.
+/// Every entry is a *name and a codepoint together*, because they are one fact and
+/// writing them apart is how four of the eight were wrong for a release: the names
+/// were the ones people use on the cheat sheet, the codepoints were written from
+/// memory, and the two were never checked against each other. U+F0F7 was labelled
+/// `nf-fa-mountain` and is `building_o`; U+F1E0 was `nf-fa-at` and is
+/// `share_nodes`; U+F584 was `screwdriver_wrench` and is not in the font at all.
+///
+/// The codepoints below were read out of the upstream `MaterialDesignIconsDesktop.ttf`
+/// and `FontAwesome.otf` cmap tables, not recalled. Both sets are checked by
+/// [`the_icon_table_names_the_glyphs_it_uses`], which pins the name against the
+/// codepoint so a future edit has to move both or fail.
 ///
 /// Not translated and not configurable. A glyph is a name for a thing, the same way
 /// `gruvbox` is a name in both languages, and the whole point is that the bar is
-/// scannable — an icon set that a user's font does not have is a row of empty boxes,
-/// which is why these are named for what they are rather than for where they came
-/// from.
+/// scannable — an icon set a user's font does not have is a row of empty boxes.
 pub mod icon {
-    /// `nf-fa-at` — the `@`, for punctuation.
-    pub const PUNCTUATION: &str = "\u{f1e0}";
-    /// `nf-fa-hashtag` — the `#`, for numbers.
+    /// `(nerd font name, the character it maps to)`.
+    ///
+    /// The character is written as an escape rather than pasted, because a pasted
+    /// private-use character is invisible in a diff and in review — the one place
+    /// where a wrong glyph would otherwise be cheapest to introduce.
+    pub const TABLE: [(&str, &str); 8] = [
+        // A dog, for punctuation. `at` would have been the obvious choice and its
+        // codepoint is U+F1FA, not the U+F1E0 that `share_nodes` lives at.
+        ("md-dog", "\u{f0a43}"),
+        // `fa-hashtag`, unchanged and verified.
+        ("fa-hashtag", "\u{f292}"),
+        // A filled clock with the hand at two. `md-clock-time-two` is the filled one
+        // and `md-clock-time-two-outline` the outline; `md-clock-time-four` — what
+        // this was labelled as — is U+F1442, not the U+F1142 that
+        // `minus-box-multiple-outline` lives at.
+        ("md-clock-time-two", "\u{f1440}"),
+        // `fa-font`, unchanged and verified.
+        ("fa-font", "\u{f031}"),
+        // The *left* quote mark, for a published passage. This was U+F10E, which is
+        // `quote_right`; the left one is U+F10D.
+        ("fa-quote_left", "\u{f10d}"),
+        // A mountain, for the test with no end. Neither icon set has a rock: MDI
+        // dropped `mountain` in v3.0.0 and has no replacement, and Font Awesome has
+        // only this one. A mountain is a rock, so it is the honest nearest thing.
+        ("fa-mountain", "\u{ef08}"),
+        // `fa-wrench`, unchanged and verified.
+        ("fa-wrench", "\u{f0ad}"),
+        // A screwdriver crossed with a wrench — the classic "hand tools" glyph, and
+        // the nearest single character to a key and a screwdriver, since no set has
+        // both in one glyph. The codepoint is U+EF70; U+F584 is not in the font.
+        ("fa-screwdriver_wrench", "\u{ef70}"),
+    ];
+
+    /// A dog's head, for punctuation.
+    pub const PUNCTUATION: &str = "\u{f0a43}";
+    /// A `#`, for numbers.
     pub const NUMBERS: &str = "\u{f292}";
-    /// `nf-md-clock_time_four` — for the timed test.
-    pub const TIME: &str = "\u{f1142}";
-    /// `nf-fa-font` — a letter `A`, for counting words.
+    /// A clock reading two, for the timed test.
+    pub const TIME: &str = "\u{f1440}";
+    /// A letter, for counting words.
     pub const WORDS: &str = "\u{f031}";
-    /// `nf-fa-quote_left` — a quotation mark, for a published passage.
-    pub const QUOTE: &str = "\u{f10e}";
-    /// `nf-fa-mountain` — for the test with no end.
-    pub const ZEN: &str = "\u{f0f7}";
-    /// `nf-fa-wrench` — for a passage of the user's own.
+    /// A quotation mark, for a published passage.
+    pub const QUOTE: &str = "\u{f10d}";
+    /// A mountain, for the test with no end.
+    pub const ZEN: &str = "\u{ef08}";
+    /// A wrench, for a passage of the user's own.
     pub const CUSTOM: &str = "\u{f0ad}";
-    /// `nf-fa-screwdriver_wrench` — for a length that is not a preset.
-    pub const OTHER: &str = "\u{f584}";
+    /// A screwdriver and a wrench, for a length that is not a preset.
+    pub const OTHER: &str = "\u{ef70}";
 
     /// The glyph for a test mode, or nothing for a length button.
     ///
-    /// A function rather than a table because the five mode buttons all share one
-    /// [`Field`] — `Field::Mode` says *which kind of setting* and not *which
-    /// setting* — so a table keyed on the field would give all five the same glyph.
+    /// A function rather than a table lookup because the five mode buttons all share
+    /// one [`crate::config::bar::Field`] — `Field::Mode` says *which kind of setting*
+    /// and not *which setting* — so a table keyed on the field would give all five
+    /// the same glyph.
     pub fn for_mode(mode: crate::config::Mode) -> &'static str {
         match mode {
             crate::config::Mode::Time => TIME,
@@ -420,13 +459,14 @@ impl Bar {
             .unwrap_or(0);
         bar
     }
-    /// The rows the bar occupies when it is drawn: a border, a blank, the
-    /// settings, a blank, a border.
+    /// The rows the bar occupies when it is drawn: a rule, the settings, a rule.
     ///
-    /// Five, always, or nothing at all. The blank rows are what make it a *frame
-    /// around* the settings rather than a strip of text with a rule over it, and
-    /// they are why this is one number instead of the ladder it replaced.
-    pub const ROWS: u16 = 5;
+    /// Three, always, or nothing at all. It was five — a rule, a blank, the settings,
+    /// a blank, a rule — and the blank rows were the right idea attached to the wrong
+    /// amount: they made the box a *panel* with air in it, when what is wanted is a
+    /// strip of settings inside a border, with the border tight to the text. A blank
+    /// row inside a one-line box is a hole, and a hole is not padding.
+    pub const ROWS: u16 = 3;
 
     /// Renders the bar into `width` columns, or `None` if it does not fit.
     ///
@@ -467,27 +507,44 @@ impl Bar {
             return None;
         }
 
-        // Two borders and two dividers are not content.
+        // Two borders and two dividers are not content. Each cell also reserves a
+        // space against each of its two edges, so even at the narrowest width that
+        // draws there is air next to every divider.
         let inner = width - 4;
-        // The widths of the three cells: `1fr auto 1fr`, which is the site's own
-        // grid and the only arrangement in which the modes stay put.
+        // The centre cell is its own content plus a space each side. The sides take
+        // whatever is left, equally.
         //
-        // The centre cell is sized to its own content plus a space against each of
-        // its two dividers, and the two side cells split what is left equally. That
-        // is not a layout preference, it is the property the bar has to have: the
-        // centre's start is `side + 2` and `side` depends only on the terminal width
-        // and the centre's own width, so changing the mode — which changes what the
-        // side cells hold — cannot move the modes. An earlier version shared the
-        // slack between all three cells, and pressing `j` twice moved the mode
-        // buttons eight columns to the left, which is a settings bar the user has to
-        // find again every time they change a setting.
-        let centre_w = self.centre.width(CELL_GAP, 0, icons) + CELL_BREATH;
+        // Neither number may depend on the *other* cells' content, and that is the
+        // whole trick. The five mode buttons are the same five buttons in every mode
+        // — same labels, same glyphs — so the centre's width is the same whatever the
+        // mode, and the sides follow from it without looking at them. The mode
+        // buttons therefore cannot move when the mode changes.
+        //
+        // An earlier version shared the leftover space by weight across all three
+        // cells, which made the centre depend on how wide the *side* cells were, and
+        // the side cells hold different things in different modes — so the modes
+        // jumped about four columns every time the mode changed. A settings bar whose
+        // controls move when you change a setting is a bar you have to find again.
+        let centre_w = self.centre.width(CELL_GAP, 0, icons) + 2;
         let side_w = inner.saturating_sub(centre_w) / 2;
         // An odd column goes to the left, so the right-hand divider is as close to
         // the edge as the geometry allows and the left-hand padding absorbs the rest.
-        let cells = [side_w + (inner - centre_w - side_w * 2), centre_w, side_w];
-        // The remainder goes to the left cell, so the three differ by at most one
-        // column and a divider does not dance when the width changes by one.
+        let mut cells = [side_w + (inner - centre_w - side_w * 2), centre_w, side_w];
+        // What each cell needs, which is what the spare is measured against. The
+        // centre's air is taken from the sides, so the sides' needs have to be known
+        // before the row is laid out.
+        //
+        // A side cell needs one column, not two: it is centred, so a single spare
+        // column lands on one side of its text, and the site's `place-self-end` puts
+        // it against the divider, which is where the space is wanted. The centre
+        // needs two, because it has a divider on *both* sides of it. The difference is
+        // three columns across the whole bar, and three columns is the difference
+        // between a Russian bar drawing at eighty and not drawing at all.
+        let needed: [usize; 3] = [
+            self.left.width(CELL_GAP, 0, icons) + 1,
+            centre_w,
+            self.right.width(CELL_GAP, 0, icons) + 1,
+        ];
 
         let counts = [
             self.left.buttons.len(),
@@ -497,50 +554,42 @@ impl Bar {
         let (selected_cell, within) = selection_in(&counts, self.selected);
         let cards = [&self.left, &self.centre, &self.right];
 
-        let mut content: Vec<Vec<Span<'static>>> = Vec::new();
-        for (index, card) in cards.iter().enumerate() {
-            content.push(render_cell(
-                &card.buttons,
-                (selected_cell == index).then_some(within),
-                theme,
-                icons,
-            ));
-        }
+        let content: Vec<Vec<Span<'static>>> = cards
+            .iter()
+            .enumerate()
+            .map(|(index, card)| {
+                render_cell(
+                    &card.buttons,
+                    (selected_cell == index).then_some(within),
+                    theme,
+                    icons,
+                )
+            })
+            .collect();
 
-        // One inner row, either carrying the settings or blank. The dividers run
-        // through the blank rows too: a divider that stops short of the corners
-        // reads as three separate boxes rather than one box in three compartments,
-        // and the whole point of the frame is that it is one bar.
-        //
-        // The three cells are aligned the way the site aligns them: the centre is
-        // `auto` and sits on its own, the left cell is `place-self-end` and the right
-        // is `place-self-start`, so both hug the centre. Centring all three in equal
-        // thirds is prettier and wrong — it is what makes the modes jump when the
-        // mode changes, because the side cells change width and the slack they share
-        // moves the centre with them.
-        let inner_row = |content: Option<&[Vec<Span<'static>>]>| {
+        // The one row with anything in it. Its text is centred in its own cell — all
+        // three, rather than the two sides hugging the middle the way the site's
+        // `place-self-end` does — because a cell flush against the outer border and a
+        // cell flush against the centre read as two different kinds of thing, and a
+        // bar of three different things is not a bar.
+        // The centre gets some air, taken from the two side cells' leftover. They
+        // are sized to what is in them rather than to the screen, so at any width
+        // that drew the bar at all they have some to give — and at the narrowest
+        // width that draws they have none, and the air is simply zero.
+        let spare = cells[0].saturating_sub(needed[0]) + cells[2].saturating_sub(needed[2]);
+        let air = CENTRE_AIR.min(spare / 2) * 2;
+        cells[0] -= air / 2;
+        cells[2] -= air / 2;
+
+        let row = {
             let mut spans: Vec<Span<'static>> = vec![Span::styled(BORDER, frame_style(theme))];
             for (index, cell_width) in cells.iter().enumerate() {
-                match content {
-                    Some(content) => {
-                        let cell = &content[index];
-                        let used: usize = cell.iter().map(|s| s.content.chars().count()).sum();
-                        let slack = cell_width.saturating_sub(used);
-                        // The outer edge keeps all its slack, which is what puts a
-                        // side cell against the middle; the divider-facing edge keeps
-                        // one column, so the two settings that share that border are
-                        // not pressed against it. The centre splits the difference.
-                        let (before, after) = match index {
-                            0 => (slack.saturating_sub(CELL_BREATH), CELL_BREATH.min(slack)),
-                            1 => (slack / 2, slack - slack / 2),
-                            _ => (CELL_BREATH.min(slack), slack.saturating_sub(CELL_BREATH)),
-                        };
-                        spans.push(Span::raw(" ".repeat(before)));
-                        spans.extend(cell.iter().cloned());
-                        spans.push(Span::raw(" ".repeat(after)));
-                    }
-                    None => spans.push(Span::raw(" ".repeat(*cell_width))),
-                }
+                let cell = &content[index];
+                let used: usize = cell.iter().map(|s| s.content.chars().count()).sum();
+                let slack = cell_width.saturating_sub(used);
+                spans.push(Span::raw(" ".repeat(slack / 2)));
+                spans.extend(cell.iter().cloned());
+                spans.push(Span::raw(" ".repeat(slack - slack / 2)));
                 if index < 2 {
                     spans.push(Span::styled(BORDER, frame_style(theme)));
                 }
@@ -560,20 +609,15 @@ impl Bar {
             ])
         };
 
-        Some(vec![
-            rule("╭", "╮"),
-            inner_row(None),
-            inner_row(Some(&content)),
-            inner_row(None),
-            rule("╰", "╯"),
-        ])
+        Some(vec![rule("╭", "╮"), row, rule("╰", "╯")])
     }
 
     /// The narrowest width at which the box can still be drawn, glyphs and all.
     ///
-    /// `1fr auto 1fr`, so the binding constraint is the centre cell plus *twice* the
-    /// wider side cell — the sides have to fit on both sides of the modes, which is
-    /// the site's own arithmetic and the reason its bar needs a wide terminal too.
+    /// The *sum* of the three cells, not the widest cell times three: each cell is
+    /// sized to its own content, and the slack only exists if there is more width
+    /// than content. The sides do not have to be as wide as the centre, because a
+    /// cell is only as wide as what is in it.
     pub fn narrowest(&self) -> usize {
         self.narrowest_with(true)
     }
@@ -584,14 +628,21 @@ impl Bar {
     /// minimum width is therefore two different facts: the width at which it can be
     /// drawn as designed, and the width at which it can be drawn at all.
     pub fn narrowest_with(&self, icons: bool) -> usize {
-        let centre = self.centre.width(CELL_GAP, 0, icons) + CELL_BREATH;
-        // One extra column on each side for the gap against the divider, so the two
-        // settings that share that border are not pressed against it.
+        // The centre plus its own margins, and the wider side cell plus its margins
+        // on *both* sides — the two side cells are the same width, so the narrower
+        // one has to fit in the wider one's space.
+        //
+        // The centre's extra air is not in here, and that is the point: it is taken
+        // from whatever the side cells have left over, and at this width they have
+        // nothing. If the air were a fixed part of the centre the bar would need four
+        // more columns than it does, and an eighty-column terminal would lose the bar
+        // altogether rather than losing two columns of padding.
+        let centre = self.centre.width(CELL_GAP, 0, icons) + 2;
         let side = self
             .left
             .width(CELL_GAP, 0, icons)
             .max(self.right.width(CELL_GAP, 0, icons))
-            + CELL_BREATH;
+            + 1;
         centre + side * 2 + 4
     }
 
@@ -657,14 +708,19 @@ const BORDER: &str = "│";
 /// The space between two buttons in a cell.
 const CELL_GAP: usize = 1;
 
-/// The space reserved on a cell's side that faces a divider.
+/// The extra air inside the centre cell, on each side of its content.
 ///
-/// One column on each of a cell's divider-facing edges, so `numbers │time` is two
-/// settings with a little air rather than two words sharing a border. The site's
-/// `place-self-end` puts a cell *against* the centre column, and that is what makes
-/// the modes stay put; this is the one column that stops "against" from meaning
-/// "touching".
-const CELL_BREATH: usize = 1;
+/// The centre holds the five modes, so it is already the widest block by
+/// arithmetic; this is what makes it *look* like the main one rather than merely
+/// measuring like it.
+///
+/// It is taken from the side cells' leftover rather than added to the bar's minimum
+/// width, which is why it costs nothing when the terminal is tight: the side cells
+/// are sized to what is in them, so at the narrowest width that draws there is no
+/// leftover to take and the air is simply zero. Adding it to the minimum instead
+/// would have cost four columns, and four columns is the difference between an
+/// eighty-column terminal drawing the bar and drawing nothing.
+const CENTRE_AIR: usize = 3;
 
 /// Renders one cell's buttons.
 ///
@@ -906,8 +962,9 @@ mod tests {
     /// Quote mode is the exception, in both languages, and it is a property of the
     /// words rather than of the layout: the lengths are `all short medium long thicc`
     /// in English and «все короткие средние длинные толстые» in Russian, and the bar
-    /// has to fit the longer one on *both* sides of the modes. Eighty-eight columns
-    /// is the honest minimum for English and a hundred and thirteen for Russian. The old
+    /// has to fit the longer one *and* leave the modes somewhere to sit. Eighty-nine
+    /// columns is the honest minimum for English and a hundred and fourteen for Russian.
+    /// The old
     /// layout answered this by moving the lengths onto a second row, which is a bar
     /// that changes shape as the window narrows — the thing this design exists to
     /// stop.
@@ -926,8 +983,8 @@ mod tests {
                 let without = bar.narrowest_with(false);
                 if mode == ConfigMode::Quote {
                     let stated = match lang {
-                        Lang::English => 88,
-                        Lang::Russian => 113,
+                        Lang::English => 89,
+                        Lang::Russian => 114,
                     };
                     assert_eq!(without, stated, "the {lang:?} quote minimum moved");
                     continue;
@@ -979,7 +1036,11 @@ mod tests {
                 button.label
             );
         }
-        assert_eq!(text.len(), 5, "the box changed height without its glyphs");
+        assert_eq!(
+            text.len(),
+            Bar::ROWS as usize,
+            "the box changed height without its glyphs"
+        );
 
         // And at the designed width they are all back.
         let full = bar.render(with_icons, theme).expect("it fits with glyphs");
@@ -1234,21 +1295,21 @@ mod tests {
                 }
                 assert_eq!(
                     bar.rows(bar.narrowest_with(false) as u16),
-                    5,
+                    Bar::ROWS,
                     "{mode:?} in {lang:?} did not draw at its own floor"
                 );
             }
         }
     }
 
-    /// The box is five rows: a border, a blank, the settings, a blank, a border.
+    /// The box is three rows: a rule, the settings, a rule, with nothing between the
+    /// text and the border.
     ///
-    /// This replaced a two-row form for narrow terminals, and asserting the exact
-    /// number is the point: the screen reserves rows from
+    /// Asserting the exact number is the point: the screen reserves rows from
     /// [`Bar::rows`] and draws from [`Bar::render`], and if those two ever disagree
     /// the bar overlaps the words or leaves a hole.
     #[test]
-    fn the_bar_is_a_five_row_box() {
+    fn the_bar_is_a_three_row_box() {
         let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
         for (mode, lang) in [
             (ConfigMode::Time, Lang::English),
@@ -1262,29 +1323,64 @@ mod tests {
             let lines = bar
                 .render(width, theme)
                 .unwrap_or_else(|| panic!("{mode:?} in {lang:?} does not fit in {width}"));
-            assert_eq!(lines.len(), 5, "{mode:?} in {lang:?}: not five rows");
+            assert_eq!(
+                lines.len(),
+                Bar::ROWS as usize,
+                "{mode:?} in {lang:?}: not {} rows",
+                Bar::ROWS
+            );
             let text: Vec<String> = lines
                 .iter()
                 .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
                 .collect();
+            let last = text.len() - 1;
             assert!(
                 text[0].starts_with('╭') && text[0].ends_with('╮'),
                 "the top rule is not a rule: {}",
                 text[0]
             );
             assert!(
-                text[4].starts_with('╰') && text[4].ends_with('╯'),
+                text[last].starts_with('╰') && text[last].ends_with('╯'),
                 "the bottom rule is not a rule: {}",
-                text[4]
+                text[last]
             );
-            // The blank rows still carry the dividers, or it is three boxes.
-            for blank in [&text[1], &text[3]] {
-                assert_eq!(
-                    blank.matches(BORDER).count(),
-                    4,
-                    "a blank row does not have both dividers: {blank}"
-                );
-            }
+            // The settings row is the only one with anything in it, and it is closed
+            // at both sides with a divider between each pair of cells.
+            assert_eq!(
+                text[1].matches(BORDER).count(),
+                4,
+                "the settings row is not framed: {}",
+                text[1]
+            );
+            assert!(
+                !text[1].trim_matches(['│', ' ']).is_empty(),
+                "the settings row is empty: {}",
+                text[1]
+            );
+        }
+    }
+
+    /// The three rows are a rule, the settings and a rule, and nothing is empty in
+    /// between.
+    ///
+    /// It was five, with a blank above and below the settings. The blank rows were
+    /// meant to make the box a panel with air in it; what they made was a hole inside
+    /// a one-line box, and a hole is not padding.
+    #[test]
+    fn there_is_no_empty_row_inside_the_box() {
+        let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
+        let bar = Bar::build(state(ConfigMode::Time));
+        let lines = bar
+            .render(bar.narrowest() as u16, theme)
+            .expect("it fits at its own width");
+        for (index, line) in lines.iter().enumerate() {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let is_rule = text.starts_with('╭') || text.starts_with('╰');
+            assert_eq!(
+                is_rule,
+                index == 0 || index == lines.len() - 1,
+                "row {index} is neither a rule nor the settings: {text:?}"
+            );
         }
     }
 
@@ -1338,7 +1434,7 @@ mod tests {
                 bar.render(floor - 1, theme).is_none(),
                 "the {mode:?} bar still fits one column below its floor"
             );
-            assert_eq!(bar.rows(floor), 5);
+            assert_eq!(bar.rows(floor), Bar::ROWS);
             assert_eq!(bar.rows(floor - 1), 0, "rows were reserved for nothing");
             // And the designed width, with the glyphs, is a real and larger number.
             assert!(
@@ -1429,20 +1525,80 @@ mod tests {
     /// same icon are one icon.
     #[test]
     fn the_eight_icons_are_eight_different_glyphs() {
-        let all = [
-            icon::PUNCTUATION,
-            icon::NUMBERS,
-            icon::TIME,
-            icon::WORDS,
-            icon::QUOTE,
-            icon::ZEN,
-            icon::CUSTOM,
-            icon::OTHER,
+        let unique: std::collections::BTreeSet<&str> =
+            icon::TABLE.iter().map(|(_, glyph)| *glyph).collect();
+        assert_eq!(
+            unique.len(),
+            icon::TABLE.len(),
+            "two icons are the same character"
+        );
+        for (name, glyph) in icon::TABLE {
+            assert_eq!(glyph.chars().count(), 1, "{name} is not one character");
+        }
+    }
+
+    /// The name and the codepoint are the same fact, so the table is the fact.
+    ///
+    /// This is the test that should have existed before the first eight were written.
+    /// Four of them were wrong for a release — `U+F0F7` labelled `nf-fa-mountain` is
+    /// `building_o`, `U+F1E0` labelled `nf-fa-at` is `share_nodes`, `U+F10E`
+    /// labelled `nf-fa-quote_left` is `quote_right`, and `U+F584` labelled
+    /// `nf-fa-screwdriver_wrench` is not in the font at all. Nobody noticed for a
+    /// release because a Nerd Font draws *something* at almost any private-use
+    /// codepoint, so a wrong icon looks like a wrong icon and not like a mistake.
+    ///
+    /// A name written beside its codepoint is at least reviewable: the pair is
+    /// checkable against the upstream cmap tables, which is where the numbers below
+    /// came from, and a reviewer who does not know the answer can still see that
+    /// `building_o` is not a mountain.
+    #[test]
+    fn the_icon_table_names_the_glyphs_it_uses() {
+        // The exact codepoints, read out of the upstream `FontAwesome.otf` and
+        // `MaterialDesignIconsDesktop.ttf` cmap tables. If this test fails, either the
+        // icon is wrong or the set has moved it — and both need a human, because a
+        // wrong one is indistinguishable from a right one on screen.
+        let expected: [(&str, u32); 8] = [
+            ("md-dog", 0xf0a43),
+            ("fa-hashtag", 0xf292),
+            ("md-clock-time-two", 0xf1440),
+            ("fa-font", 0xf031),
+            ("fa-quote_left", 0xf10d),
+            ("fa-mountain", 0xef08),
+            ("fa-wrench", 0xf0ad),
+            ("fa-screwdriver_wrench", 0xef70),
         ];
-        let unique: std::collections::BTreeSet<&str> = all.iter().copied().collect();
-        assert_eq!(unique.len(), all.len(), "two icons are the same character");
-        for glyph in all {
-            assert_eq!(glyph.chars().count(), 1, "{glyph:?} is not one character");
+        for ((name, glyph), (want_name, want_cp)) in icon::TABLE.iter().zip(expected) {
+            assert_eq!(
+                *name, want_name,
+                "the table and this test disagree on a name"
+            );
+            let got = glyph.chars().next().expect("one character") as u32;
+            assert_eq!(
+                got, want_cp,
+                "{name} is U+{got:05X}, not U+{want_cp:05X} — \
+                 either the codepoint is wrong or the icon set has moved it"
+            );
+        }
+    }
+
+    /// And the eight named constants are the same eight, so a caller using
+    /// `icon::ZEN` cannot get a different glyph from one reached through the table.
+    #[test]
+    fn the_named_icons_are_the_table() {
+        for (name, glyph) in [
+            ("PUNCTUATION", icon::PUNCTUATION),
+            ("NUMBERS", icon::NUMBERS),
+            ("TIME", icon::TIME),
+            ("WORDS", icon::WORDS),
+            ("QUOTE", icon::QUOTE),
+            ("ZEN", icon::ZEN),
+            ("CUSTOM", icon::CUSTOM),
+            ("OTHER", icon::OTHER),
+        ] {
+            assert!(
+                icon::TABLE.iter().any(|(_, t)| *t == glyph),
+                "icon::{name} is not in the table"
+            );
         }
     }
 
@@ -1479,13 +1635,16 @@ mod tests {
         .map(|mode| {
             let bar = Bar::build(state(mode));
             let lines = bar.render(200, theme).expect("it fits");
-            // Row 2 of the box: the border, the blank, then the settings.
-            let line = &lines[2];
+            // The middle row of the box, which is where the settings are.
+            let line = &lines[Bar::ROWS as usize / 2];
             // Each button is its own span, so the mode cell starts at the first
-            // button whose label is exactly "time".
+            // button whose label is the timed one. The glyph comes from the constant
+            // rather than being written here, because a test that spells out the
+            // glyph is a second place for it to be wrong.
+            let timed = format!("{} time", icon::TIME);
             let mut at = 0usize;
             for span in &line.spans {
-                if span.content.as_ref() == "\u{f1142} time" {
+                if span.content.as_ref() == timed {
                     return at;
                 }
                 at += span.content.chars().count();

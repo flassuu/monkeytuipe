@@ -650,8 +650,13 @@ fn every_mode_draws_a_whole_bar_or_no_bar() {
             assert_eq!(app.bar().rows(80), 0, "{mode:?} reserved rows for nothing");
             continue;
         }
-        // The box is five rows, or nothing.
-        assert_eq!(app.bar().rows(80), 5, "{mode:?}: not five rows");
+        // The box is three rows, or nothing.
+        assert_eq!(
+            app.bar().rows(80),
+            monkeytuipe::screens::topbar::Bar::ROWS,
+            "{mode:?}: not {} rows",
+            monkeytuipe::screens::topbar::Bar::ROWS
+        );
         for expected in ["time", "words", "quote", "zen", "custom"] {
             assert!(
                 bar.contains(expected),
@@ -695,21 +700,21 @@ fn the_cells_are_separated_by_a_divider_with_room_either_side() {
     let app = in_mode(monkeytuipe::config::Mode::Time);
     let buffer = render(&app, 100, 20);
     let bar = bar_row(&app, &buffer);
-    // Three inner rows, each with a border on both sides and a divider between each
-    // pair of cells: three rows of four.
-    assert_eq!(
-        bar.matches('│').count(),
-        12,
-        "the box is not drawn: {bar:?}"
-    );
+    // One row carries the settings, with a border at each end and a divider between
+    // each pair of cells: four.
+    assert_eq!(bar.matches('│').count(), 4, "the box is not drawn: {bar:?}");
     for boundary in ["numbers", "custom"] {
         let at = bar
             .find(boundary)
             .unwrap_or_else(|| panic!("no {boundary} in {bar:?}"));
         let after = &bar[at + boundary.len()..];
         assert!(
-            after.starts_with(" │"),
-            "nothing between {boundary:?} and the next cell: {bar:?}"
+            after.trim_start().starts_with('│'),
+            "no divider after {boundary:?}, or nothing between it and one: {bar:?}"
+        );
+        assert!(
+            !after.starts_with('│'),
+            "{boundary:?} is pressed against the divider: {bar:?}"
         );
     }
 }
@@ -1284,7 +1289,7 @@ fn the_bar_is_in_russian_too() {
 /// `all short medium long thicc` — and the bar is either the whole box or none of it.
 ///
 /// It used to fall back to two rows with the lengths below, which is a bar that
-/// changes shape as the window narrows and whose controls move. A hundred and thirteen
+/// changes shape as the window narrows and whose controls move. A hundred and fourteen
 /// columns is the honest minimum for that one case, and the test is here to say so
 /// rather than to let somebody find it by resizing a window.
 #[test]
@@ -1308,10 +1313,10 @@ fn a_russian_quote_bar_states_its_width_instead_of_becoming_two_rows() {
     // One column at a time, so the number in the assertion above is the real one.
     assert_eq!(
         russian.bar().narrowest_with(false),
-        113,
+        114,
         "the Russian quote floor moved"
     );
-    let buffer = render(&russian, 113, 24);
+    let buffer = render(&russian, 114, 24);
     let bar = area_text(&buffer, layout_of(&russian, &buffer).bar);
     assert!(bar.contains("дзен"), "the modes are missing: {bar:?}");
     assert!(
@@ -1319,7 +1324,12 @@ fn a_russian_quote_bar_states_its_width_instead_of_becoming_two_rows() {
         "the quote lengths are gone: {bar:?}"
     );
     // And the screen reserved the five rows it drew, never two.
-    assert_eq!(bar_rows(&russian, 113), 5, "the box is not five rows");
+    assert_eq!(
+        bar_rows(&russian, 114),
+        monkeytuipe::screens::topbar::Bar::ROWS,
+        "the box is not {} rows",
+        monkeytuipe::screens::topbar::Bar::ROWS
+    );
 }
 
 /// The settings screen is where the language is chosen, so it has to be the screen
