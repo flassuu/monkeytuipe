@@ -44,6 +44,12 @@ unicode-width = "0.1" # must match the version ratatui lays text out with
 dirs = "5"
 rand = "0.9.5"
 
+[target.'cfg(unix)'.dependencies]
+# `poll` and `read` on the standard input file descriptor, for asking the terminal
+# what colours it is using. Unix only: nothing here is needed anywhere else, and
+# the Windows path returns "unknown" rather than blocking on a handle.
+libc = "0.2"
+
 [profile.release]
 lto = "thin"
 strip = true

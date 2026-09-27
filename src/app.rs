@@ -1453,8 +1453,8 @@ impl App {
                 self.settle();
                 false
             }
-            Effect::Adjust(row) => {
-                self.adjust(row);
+            Effect::Adjust(row, by) => {
+                self.adjust_by(row, by);
                 false
             }
             Effect::SetLanguage(id) => {
@@ -1531,28 +1531,24 @@ impl App {
                 false
             }
             Effect::Toggle(row) => {
-                self.adjust(row);
+                self.adjust_by(row, 1);
                 false
             }
         }
     }
 
-    /// Applies a `left`/`right` press, or a toggle, to a settings row.
+    /// Applies a settings row, in the given direction.
     ///
     /// Every variant is listed, including the ones that do nothing, so a new row
     /// cannot silently become a no-op: adding it here and forgetting it is a
     /// compile error rather than a key that quietly stops working.
-    fn adjust(&mut self, row: Row) {
-        self.adjust_by(row, 1)
-    }
-
-    /// As [`Self::adjust`], but in a direction.
     ///
-    /// A toggle does not care which way it is pressed and a cycle does, so the
-    /// direction is a parameter rather than being baked into the caller's key.
+    /// A toggle ignores the direction — there is no such thing as turning a toggle
+    /// off *further* — and a cycle obeys it, which is why the direction is a
+    /// parameter rather than being fixed at `1` here.
     fn adjust_by(&mut self, row: Row, by: i8) {
         match row {
-            Row::Theme => self.config.theme = self.config.theme.next(),
+            Row::Theme => self.config.theme = self.config.theme.step(isize::from(by)),
             Row::Language => {
                 let id = next_language(&self.config.test.language);
                 self.config.test.language = id.clone();
@@ -1961,8 +1957,10 @@ mod tests {
         assert!(app.is_dirty());
         assert_eq!(
             app.config.theme,
-            crate::config::theme::ThemeName::Monkeytype,
-            "auto is the default, so the first step is the first real theme"
+            // `auto` is the default and the first step is the next thing after it,
+            // which is the terminal's own colours.
+            crate::config::theme::ThemeName::Terminal,
+            "the first step off the default is the next theme in the list"
         );
     }
 

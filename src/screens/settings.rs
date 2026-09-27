@@ -194,28 +194,36 @@ impl Settings {
                 };
                 Vec::new()
             }
-            Action::Left | Action::Right => match row {
-                // Theme and difficulty are short ordered lists, so a step is the
-                // right thing to do with left and right.
-                Row::Theme | Row::Difficulty => vec![Effect::Adjust(row)],
-                // The others are not "one step from the last": they are a list or
-                // a sentence, and stepping through a list of two hundred by
-                // pressing right is a way of never choosing one.
-                Row::Language => {
-                    self.view = View::Languages { base: 0, size: 0 };
-                    Vec::new()
+            Action::Left | Action::Right => {
+                let by = if matches!(action, Action::Left) {
+                    -1
+                } else {
+                    1
+                };
+                match row {
+                    // Theme and difficulty are short ordered lists, so a step is the
+                    // right thing to do with left and right — in the direction that
+                    // was pressed, which is the whole point of having two arrows.
+                    Row::Theme | Row::Difficulty => vec![Effect::Adjust(row, by)],
+                    // The others are not "one step from the last": they are a list or
+                    // a sentence, and stepping through a list of two hundred by
+                    // pressing right is a way of never choosing one.
+                    Row::Language => {
+                        self.view = View::Languages { base: 0, size: 0 };
+                        Vec::new()
+                    }
+                    Row::CustomText | Row::ApeKey => vec![Effect::OpenEditor(row)],
+                    // The submit toggle says why it cannot submit; it is not a switch
+                    // that does nothing.
+                    Row::SubmitResults => vec![Effect::ShowMessage(
+                        crate::api::submission::Destination::Monkeytype
+                            .describe()
+                            .to_owned(),
+                    )],
+                    Row::Back => Vec::new(),
+                    _ => Vec::new(),
                 }
-                Row::CustomText | Row::ApeKey => vec![Effect::OpenEditor(row)],
-                // The submit toggle says why it cannot submit; it is not a switch
-                // that does nothing.
-                Row::SubmitResults => vec![Effect::ShowMessage(
-                    crate::api::submission::Destination::Monkeytype
-                        .describe()
-                        .to_owned(),
-                )],
-                Row::Back => Vec::new(),
-                _ => Vec::new(),
-            },
+            }
             Action::Select => self.open(row),
             Action::Back | Action::Settings => vec![Effect::Switch(ScreenKind::Typing)],
             _ => Vec::new(),
@@ -227,7 +235,7 @@ impl Settings {
     fn open(&mut self, row: Row) -> Vec<Effect> {
         match row {
             Row::Back => vec![Effect::Switch(ScreenKind::Typing)],
-            Row::Theme => vec![Effect::Adjust(row)],
+            Row::Theme => vec![Effect::Adjust(row, 1)],
             Row::SubmitResults => vec![Effect::ShowMessage(
                 crate::api::submission::Destination::Monkeytype
                     .describe()
@@ -238,7 +246,7 @@ impl Settings {
                 Vec::new()
             }
             Row::CustomText | Row::ApeKey => vec![Effect::OpenEditor(row)],
-            _ => vec![Effect::Adjust(row)],
+            _ => vec![Effect::Adjust(row, 1)],
         }
     }
 
@@ -559,6 +567,7 @@ const NOT_HERE: [Row; 5] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyCode;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::path::PathBuf;
@@ -567,6 +576,30 @@ mod tests {
 
     fn app() -> App {
         App::new(Config::default(), PathBuf::from("/nonexistent/config.toml"))
+    }
+
+    /// A row's current value, read out of the app, for a test about direction.
+    /// Walks the *app's* selection to `row`, through the real key path.
+    fn walk_app(app: &mut App, row: Row) {
+        for _ in 0..ROWS.len() {
+            if app.selected_row() == Some(row) {
+                return;
+            }
+            app.press(KeyCode::Down);
+        }
+        panic!(
+            "could not walk to {row:?}; stopped on {:?}",
+            app.selected_row()
+        );
+    }
+
+    /// A row's current value, read out of the app, for a test about direction.
+    fn value_of(app: &App, row: Row) -> String {
+        match row {
+            Row::Theme => app.config.theme.label().to_owned(),
+            Row::Difficulty => app.config.test.difficulty.label().to_owned(),
+            other => panic!("{other:?} is not a value a direction applies to"),
+        }
     }
 
     fn draw(settings: &Settings, app: &App, width: u16, height: u16) -> String {
@@ -667,7 +700,74 @@ mod tests {
     #[test]
     fn enter_on_the_theme_cycles_it() {
         let effects = keys_for(&[Action::Select]);
-        assert_eq!(effects, vec![Effect::Adjust(Row::Theme)]);
+        assert_eq!(effects, vec![Effect::Adjust(Row::Theme, 1)]);
+    }
+
+    /// The bug this fixes: `left` and `right` were the same key. Both arrows went
+    /// the same way, so a theme could be cycled forwards but not back, and a
+    /// difficulty could not be walked in the direction the arrow pointed.
+    /// On the top row, which is where `keys_for` starts. The two arrows produce
+    /// two different effects, with opposite signs.
+    #[test]
+    fn the_two_arrows_step_in_opposite_directions() {
+        let left = keys_for(&[Action::Left]);
+        let right = keys_for(&[Action::Right]);
+        assert_eq!(left, vec![Effect::Adjust(Row::Theme, -1)]);
+        assert_eq!(right, vec![Effect::Adjust(Row::Theme, 1)]);
+        assert_ne!(left, right, "the two arrows did the same thing");
+    }
+
+    /// And the direction survives all the way to the value, which is the part that
+    /// matters: an effect that carries a sign nobody reads is the same bug one
+    /// layer down.
+    ///
+    /// Driven through the app, not the screen, because the screen only produces
+    /// effects. The value is the app's, and a test that stops at the effect cannot
+    /// see a sign dropped on the floor.
+    #[test]
+    fn the_arrows_reach_the_value_in_their_own_directions() {
+        for row in [Row::Theme, Row::Difficulty] {
+            let mut app = app();
+            app.show_screen(crate::screens::ScreenKind::Settings);
+            walk_app(&mut app, row);
+
+            let start = value_of(&app, row);
+            app.press(KeyCode::Right);
+            let after_right = value_of(&app, row);
+            assert_ne!(after_right, start, "{row:?}: right did nothing");
+
+            app.press(KeyCode::Left);
+            assert_eq!(
+                value_of(&app, row),
+                start,
+                "{row:?}: left did not undo right, so the two arrows are one key"
+            );
+        }
+    }
+
+    /// And each direction comes back round on its own.
+    #[test]
+    fn a_cycled_row_comes_back_round_in_both_directions() {
+        let mut app = app();
+        app.show_screen(crate::screens::ScreenKind::Settings);
+        walk_app(&mut app, Row::Difficulty);
+        let start = value_of(&app, Row::Difficulty);
+        for _ in 0..crate::config::bar::DIFFICULTIES.len() {
+            app.press(KeyCode::Right);
+        }
+        assert_eq!(
+            value_of(&app, Row::Difficulty),
+            start,
+            "right does not come back round"
+        );
+        for _ in 0..crate::config::bar::DIFFICULTIES.len() {
+            app.press(KeyCode::Left);
+        }
+        assert_eq!(
+            value_of(&app, Row::Difficulty),
+            start,
+            "left does not come back round"
+        );
     }
 
     /// A list of two hundred must not be stepped through with one key.
@@ -694,7 +794,15 @@ mod tests {
         settings.handle(Action::Down); // the second base
         settings.handle(Action::Right); // the 1k size
         let effects = settings.handle(Action::Select);
-        assert_eq!(effects, vec![Effect::SetLanguage("russian_1k".to_owned())]);
+        // The second base is whatever the list says it is. Hard-coding `russian`
+        // here meant the test broke the first time the list was reordered, and
+        // said nothing about whether the browser picks the right one.
+        let second = variants::POPULAR_BASES[1];
+        assert_eq!(
+            effects,
+            vec![Effect::SetLanguage(format!("{second}_1k"))],
+            "the browser picked the wrong language"
+        );
         assert_eq!(settings.view(), &View::Rows, "the browser stayed open");
     }
 

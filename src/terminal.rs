@@ -14,6 +14,8 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
+pub mod palette;
+
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 pub type TuiResult<T> = Result<T, TuiError>;

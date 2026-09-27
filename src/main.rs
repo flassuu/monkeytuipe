@@ -45,6 +45,16 @@ async fn main() -> anyhow::Result<()> {
     // `arm` before `init`: if entering the alternate screen fails, the panic
     // hook that restores the terminal is already in place.
     let mut guard = terminal::TerminalGuard::arm();
+
+    // Ask the terminal what colours it is using, *before* the alternate screen
+    // and before crossterm's event reader takes standard input. Both matter: the
+    // query needs raw mode to read the reply, and the reply has to be read by us
+    // rather than racing the event loop for the same bytes.
+    //
+    // Bounded at a couple of hundred milliseconds and impossible to fail, so a
+    // terminal that ignores the question costs nothing but that.
+    terminal::palette::cache_now();
+
     let mut tui = terminal::init().context("entering the terminal")?;
 
     let result = App::new(config, config_path.clone()).run(&mut tui);

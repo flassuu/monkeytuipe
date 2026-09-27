@@ -37,7 +37,10 @@ pub enum Effect {
     /// Jump over the active word.
     SkipWord,
     /// Left/right on a settings row.
-    Adjust(Row),
+    /// Step a settings row. The sign is a direction, not a magnitude: a toggle
+    /// ignores it, a cycle obeys it, and `Left` must not step the same way as
+    /// `Right`.
+    Adjust(Row, i8),
     /// Space on a settings row.
     Toggle(Row),
     /// Move the settings bar's selection left (`-1`) or right (`1`).

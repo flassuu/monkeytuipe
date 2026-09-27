@@ -27,56 +27,64 @@ pub const LARGEST_ENGLISH: u32 = 450;
 
 /// Base languages offered in the settings browser.
 ///
+/// The bases worth offering, in alphabetical order.
+///
 /// Upstream publishes about four hundred, and listing all of them would mean a
 /// picker nobody scrolls to the end of and a config file nobody edits by hand.
-/// These are the ones a test is actually run in, in the order they are worth
-/// offering, and the base lists for the first six of them are in the binary — so
-/// picking any of these works offline and picking any of the rest costs one
-/// download.
+/// These are the ones a test is actually run in.
+///
+/// **Alphabetical, not by popularity.** That is a change of mind: this list used
+/// to lead with `english` because that is the one most tests are run in. But the
+/// picker is a list of forty names, and a list you have to read to find a
+/// language you already know the name of is worse than one you can scan. Nobody
+/// browses a language list looking for the *common* one; they are looking for
+/// theirs. English is still near the top — `arabic` and `chinese_simplified` sort
+/// ahead of it — and `english` is also the fallback, so a language that is not
+/// here still leaves the app typing English rather than nothing.
 ///
 /// The sizes are not listed here: they are derived from the base, which is the
 /// whole point of the scheme.
 pub const POPULAR_BASES: &[&str] = &[
-    "english",
-    "russian",
-    "german",
-    "spanish",
-    "french",
-    "portuguese",
-    "italian",
-    "polish",
-    "dutch",
-    "ukrainian",
-    "romanian",
-    "czech",
-    "swedish",
-    "turkish",
-    "norwegian",
-    "finnish",
-    "danish",
-    "greek",
-    "hungarian",
+    "arabic",
     "bulgarian",
+    "chinese_simplified",
+    "croatian",
+    "czech",
+    "danish",
+    "dutch",
+    "english",
+    "estonian",
+    "finnish",
+    "french",
+    "german",
+    "greek",
+    "hebrew",
+    "hindi",
+    "hungarian",
+    "indonesian",
+    "italian",
+    "japanese",
+    "kazakh",
+    "korean",
+    "latvian",
+    "lithuanian",
+    "norwegian",
+    "polish",
+    "portuguese",
+    "portuguese_brazilian",
+    "romanian",
+    "russian",
     "serbian",
     "slovak",
     "slovenian",
-    "croatian",
-    "hebrew",
-    "arabic",
-    "hindi",
-    "chinese_simplified",
-    "japanese",
-    "korean",
-    "vietnamese",
-    "thai",
-    "indonesian",
-    "estonian",
-    "latvian",
-    "lithuanian",
-    "kazakh",
+    "spanish",
+    "swedish",
     "swiss_german",
-    "portuguese_brazilian",
     "tagalog",
+    "thai",
+    "turkish",
+    "ukrainian",
+    "vietnamese",
 ];
 
 /// A word list the user can pick, and the file it comes from.
@@ -304,7 +312,7 @@ mod tests {
     /// that are in the binary first — picking one of those must work with no
     /// network at all.
     #[test]
-    fn the_offered_bases_start_with_the_embedded_ones() {
+    fn every_embedded_base_is_offered_in_the_browser() {
         let embedded: Vec<&str> = crate::words::language::embedded_ids().collect();
         for id in &embedded {
             assert!(
@@ -312,8 +320,26 @@ mod tests {
                 "{id} is embedded but not offered in the browser"
             );
         }
-        // And the first entry is the one most tests are run in.
-        assert_eq!(POPULAR_BASES[0], "english");
+    }
+
+    /// The list is sorted, and the test is on the list rather than on a
+    /// hand-maintained ordering: a list of forty names that is *meant* to be
+    /// alphabetical and quietly is not is worse than no order at all, because
+    /// finding a language in it becomes a search.
+    #[test]
+    fn the_offered_bases_are_in_alphabetical_order() {
+        let mut sorted = POPULAR_BASES.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(sorted, POPULAR_BASES, "the base list is not alphabetical");
+    }
+
+    /// And nothing is listed twice, which sorting would hide rather than reveal.
+    #[test]
+    fn no_base_is_listed_twice() {
+        let mut seen = std::collections::BTreeSet::new();
+        for base in POPULAR_BASES {
+            assert!(seen.insert(*base), "{base} is listed twice");
+        }
     }
 
     #[test]

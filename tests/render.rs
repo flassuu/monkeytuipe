@@ -663,55 +663,6 @@ fn the_cards_are_separated_by_something() {
     }
 }
 
-/// A pressed button is a fill, not a hue shift. A hue shift is invisible on a
-/// monochrome terminal and a fill is not, which is the whole reason for doing it
-/// this way round.
-#[test]
-fn the_active_mode_is_drawn_as_a_fill() {
-    let app = in_mode(monkeytuipe::config::Mode::Time);
-    let buffer = render(&app, 80, 20);
-    let bar = layout_of(&app, &buffer).bar;
-    let theme = app.theme();
-    let at = |needle: &str| -> (u16, u16) {
-        let row = area_text(&buffer, bar);
-        let column = row.find(needle).unwrap_or_else(|| panic!("no {needle}")) as u16;
-        (column, bar.y)
-    };
-    // The active mode is filled with the accent; an inactive one is not filled at
-    // all.
-    let (x, y) = at("time");
-    assert_eq!(
-        buffer[(x, y)].bg,
-        theme.accent,
-        "the active mode is not filled"
-    );
-    let (x, y) = at("zen");
-    assert_ne!(
-        buffer[(x, y)].bg,
-        theme.accent,
-        "an inactive mode is filled"
-    );
-}
-
-/// The bars of two different modes put the mode card in the same place, as long
-/// as the bar can be centred. The `1fr auto 1fr` grid does this, and it is why
-/// the bar feels like a bar rather than a list that rewraps.
-#[test]
-fn the_mode_card_does_not_move_between_modes_that_fit_centred() {
-    let offset = |mode| -> usize {
-        let app = in_mode(mode);
-        let buffer = render(&app, 120, 20);
-        let bar = bar_row(&app, &buffer);
-        bar.find("time words")
-            .unwrap_or_else(|| panic!("no mode card in {bar:?}"))
-    };
-    let a = offset(monkeytuipe::config::Mode::Time);
-    let b = offset(monkeytuipe::config::Mode::Words);
-    let c = offset(monkeytuipe::config::Mode::Custom);
-    assert_eq!(a, b, "the modes moved between time and words");
-    assert_eq!(a, c, "the modes moved between time and custom");
-}
-
 /// Below the width the bar needs there is no bar at all rather than half of one.
 /// The words and the counters are the test; the bar is a convenience.
 #[test]

@@ -173,6 +173,11 @@ pub const COMMANDS: &[Command] = &[
         action: Action::NextTheme,
     },
     Command {
+        display: "terminal colours",
+        aliases: &["theme", "terminal", "native"],
+        action: Action::Theme("terminal"),
+    },
+    Command {
         display: "gruvbox",
         aliases: &["theme"],
         action: Action::Theme("gruvbox"),

@@ -599,27 +599,30 @@ fn card_style(theme: Theme) -> Style {
     Style::default().fg(theme.surface).bg(theme.background)
 }
 
-/// A button, pressed or not.
+/// A button: on, off, disabled, and whether the arrows are on it.
 ///
-/// Pressed is a fill, which is the site's `variant="button"` active state rather
-/// than its `variant="text"` hue shift — see the module docs for why.
+/// Four states, and they are four different things:
+///
+/// - **on** — the accent colour, bold. This is the site's `variant="text"`
+///   pressed state.
+/// - **off** — the muted colour.
+/// - **disabled** — muted, and *not* bold even when on. The site dims to
+///   `opacity: 0.33`; a terminal has no opacity, so the muted colour is the honest
+///   equivalent, and a disabled control that is also the active one would be
+///   claiming to be on while refusing to be turned off.
+/// - **selected** — foreground instead of muted, and underlined. Underline rather
+///   than a fill, because the row of labels is what has to stay readable and an
+///   underline marks a position without occupying the cell.
 pub fn button_span(button: &Button, selected: bool, theme: Theme) -> Span<'static> {
     let style = if button.disabled {
-        // The site dims to `opacity: 0.33`. A terminal has no opacity, so the
-        // muted colour plus a lack of emphasis is the honest equivalent.
         Style::default().fg(theme.muted)
     } else if button.active {
         Style::default()
-            .fg(theme.background)
-            .bg(theme.accent)
-            .add_modifier(Modifier::BOLD)
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     } else if selected {
-        // The button the arrows are on. An underline rather than a second fill,
-        // because the fill is already spoken for by "active" and two fills would
-        // be two things meaning the same thing.
         Style::default()
             .fg(theme.foreground)
-            .bg(theme.surface)
             .add_modifier(Modifier::UNDERLINED)
     } else {
         Style::default().fg(theme.muted)
@@ -832,38 +835,83 @@ mod tests {
         assert_eq!(bar.activate(), None, "an inert bar still activated a field");
     }
 
+    fn button(active: bool, selected: bool) -> ratatui::text::Span<'static> {
+        button_span(
+            &Button {
+                label: "punctuation",
+                field: Field::Punctuation,
+                active,
+                disabled: false,
+            },
+            selected,
+            crate::config::theme::ThemeName::Gruvbox.resolve(),
+        )
+    }
+
+    /// The active option is a highlighted word: the accent colour, bold. No
+    /// background, because a run of filled cells stops reading as a row of buttons.
     #[test]
-    fn a_pressed_button_is_filled_not_recoloured() {
-        let pressed = button_span(
+    fn the_active_option_is_a_highlighted_word_and_not_a_fill() {
+        let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
+        let on = button(true, false);
+        let off = button(false, false);
+        assert!(
+            on.style.bg.is_none(),
+            "the active option is drawn with a fill"
+        );
+        assert_eq!(
+            on.style.fg,
+            Some(theme.accent),
+            "the active text is not the accent"
+        );
+        assert!(
+            on.style.add_modifier.contains(Modifier::BOLD),
+            "the active text is not bold"
+        );
+        assert_eq!(
+            off.style.fg,
+            Some(theme.muted),
+            "an inactive option is not muted"
+        );
+        assert_ne!(on.style, off.style);
+    }
+
+    /// The arrows are somewhere different from "on", and the two have to be
+    /// distinguishable — an arrow on an inactive option must not look like an
+    /// arrow on an active one, or there is no telling which is which.
+    #[test]
+    fn the_selection_and_the_active_state_can_be_told_apart() {
+        let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
+        let selected_off = button(false, true);
+        let active = button(true, true);
+        let inactive_untouched = button(false, false);
+        assert_ne!(
+            selected_off.style, inactive_untouched.style,
+            "there is no way to see where the arrows are"
+        );
+        assert_ne!(selected_off.style, active.style);
+        assert_eq!(selected_off.style.fg, Some(theme.foreground));
+    }
+
+    /// A disabled control that is also the active one is a control claiming to be
+    /// on while refusing to be turned off. Quote mode produces exactly that, and
+    /// the site forces both toggles false on entry so it does not.
+    #[test]
+    fn a_disabled_option_is_not_drawn_as_active() {
+        let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
+        let style = button_span(
             &Button {
                 label: "punctuation",
                 field: Field::Punctuation,
                 active: true,
-                disabled: false,
+                disabled: true,
             },
             false,
-            crate::config::theme::ThemeName::Gruvbox.resolve(),
-        );
-        let idle = button_span(
-            &Button {
-                label: "punctuation",
-                field: Field::Punctuation,
-                active: false,
-                disabled: false,
-            },
-            false,
-            crate::config::theme::ThemeName::Gruvbox.resolve(),
-        );
-        // A hue shift is invisible on a monochrome terminal; a fill is not.
-        assert!(
-            pressed.style.bg.is_some(),
-            "a pressed button has no fill, so a monochrome terminal cannot see it"
-        );
-        assert!(
-            idle.style.bg.is_none(),
-            "an unpressed button should be unfilled"
-        );
-        assert_ne!(pressed.style, idle.style);
+            theme,
+        )
+        .style;
+        assert_eq!(style.fg, Some(theme.muted));
+        assert!(!style.add_modifier.contains(Modifier::BOLD));
     }
 
     /// A bar that cannot be laid out is not drawn half. A truncated card looks
