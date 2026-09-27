@@ -66,8 +66,14 @@ pub struct TypingRows {
 /// hold both it is dropped entirely rather than squeezed — ratatui's own solver
 /// would give the fixed-height rows priority and leave the words nothing.
 ///
-/// The header and the counters always keep their row, because they are the only
+/// The header and the counters always keep their rows, because they are the only
 /// place the status and the numbers live.
+///
+/// The counters are three rows, not one, because they are drawn in the same frame as
+/// the settings bar: a rule, the numbers, a rule. A bar that is a box at the top of
+/// the screen and a bare line at the bottom is two different styles for two things
+/// that are both "where the state of the test is", and the mismatch reads as an
+/// accident rather than a decision.
 pub fn rows_for(area: Rect, bar_rows: u16) -> TypingRows {
     let bottom = area.y + area.height;
 
@@ -80,11 +86,13 @@ pub fn rows_for(area: Rect, bar_rows: u16) -> TypingRows {
     );
     let cursor = area.y + header.height + bar.height;
 
+    // Two rules and the line between them, and never more than the screen has.
+    let counters_height = COUNTER_ROWS.min(area.height);
     let counters = Rect::new(
         area.x,
-        bottom.saturating_sub(1),
+        bottom.saturating_sub(counters_height),
         area.width,
-        1.min(area.height),
+        counters_height,
     );
     let free = bottom
         .saturating_sub(cursor)
@@ -111,6 +119,13 @@ pub fn rows_for(area: Rect, bar_rows: u16) -> TypingRows {
         counters,
     }
 }
+
+/// The rows the counters occupy: a rule, the numbers, a rule.
+///
+/// Named rather than spelled out at the one place that needs it, because the height
+/// is asked for in two places — the layout reserves it and the render draws it — and
+/// a frame whose rules do not meet its own borders is a frame with a gap in it.
+pub const COUNTER_ROWS: u16 = 3;
 
 impl Screen for Typing {
     fn render(&self, app: &App, frame: &mut Frame) {
@@ -524,8 +539,17 @@ fn render_chart(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
     widgets::render(&chart, chart_area, frame.buffer_mut(), theme);
 }
 
-/// The counters, all on one line and centred, the way the site shows them.
+/// The counters, framed like the settings bar: a rule, the numbers, a rule.
+///
+/// One line and centred, the way the site shows them, inside the same border
+/// characters the bar uses. The rules are the *whole width* rather than hugging the
+/// text, so the frame says "this is the status line" rather than "this is a box drawn
+/// round these numbers" — and so it lines up with the bar above it, which is the
+/// point of using the same style in the same place.
 fn render_counters(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     // Escape is the command list — the same binding the site has when
     // `quickRestart` is off, which is the default — so it is worth saying, or the
     // list is a thing that exists and nothing points at it.
@@ -558,10 +582,43 @@ fn render_counters(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
     ));
     spans.push(Span::styled(format!("·  {hint}"), theme.chrome()));
 
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
-        area,
-    );
+    // The three rows: rule, numbers, rule. A screen with fewer rows than that gets
+    // the numbers and no frame rather than a frame and no numbers — the numbers are
+    // the content and the frame is not.
+    let inner = area.width.saturating_sub(2);
+    let rule = |left: &'static str, right: &'static str| {
+        Line::from(vec![
+            Span::styled(left, theme.chrome()),
+            Span::styled("─".repeat(inner as usize), theme.chrome()),
+            Span::styled(right, theme.chrome()),
+        ])
+    };
+    let lines = if area.height >= COUNTER_ROWS {
+        // The numbers row is closed at both sides, as the bar's content row is. A
+        // box that is open where its neighbours are closed reads as a mistake, and
+        // the reason the bar closes them is the same one: the frame is what says
+        // where the thing ends.
+        //
+        // The centring is done here rather than by the paragraph, because the
+        // paragraph would centre the two `│` along with the text and leave them
+        // pressed against the words instead of against the edge of the frame.
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let slack = (inner as usize).saturating_sub(used);
+        let mut numbers = vec![
+            Span::styled("│", theme.chrome()),
+            Span::raw(" ".repeat(slack / 2)),
+        ];
+        numbers.extend(spans.iter().cloned());
+        numbers.push(Span::raw(" ".repeat(slack - slack / 2)));
+        numbers.push(Span::styled("│", theme.chrome()));
+        vec![rule("╭", "╮"), Line::from(numbers), rule("╰", "╯")]
+    } else {
+        vec![Line::from(spans)]
+    };
+
+    // Left-aligned, because the rows above and below are full width and the frame
+    // only lines up if nothing is being pushed around.
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 #[cfg(test)]

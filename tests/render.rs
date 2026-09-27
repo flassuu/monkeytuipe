@@ -120,17 +120,49 @@ fn the_typing_screen_draws_its_header_and_counters() {
     }
 }
 
-/// The counters go on one line, the way the site shows them.
+/// The counters are three rows — a rule, the numbers, a rule — in the same frame as
+/// the settings bar.
+///
+/// They used to be one bare row. That was two different styles for two things that
+/// are both "where the state of the test is", and the mismatch read as an accident.
+/// The numbers are still all on one line; the frame is what grew.
 #[test]
-fn the_counters_share_a_single_row() {
+fn the_counters_are_framed_like_the_bar() {
     let app = app();
     let buffer = render(&app, 100, 20);
     let counters = layout_of(&app, &buffer).counters;
-    assert_eq!(counters.height, 1, "the counters get one row, not a block");
+    assert_eq!(
+        counters.height,
+        monkeytuipe::screens::typing::COUNTER_ROWS,
+        "the counters are not three rows"
+    );
 
-    let row: String = (counters.x..counters.x + counters.width)
-        .map(|x| buffer[(x, counters.y)].symbol())
+    let rows: Vec<String> = (counters.y..counters.y + counters.height)
+        .map(|y| {
+            (counters.x..counters.x + counters.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        })
         .collect();
+    assert!(
+        rows[0].starts_with('╭') && rows[0].ends_with('╮'),
+        "{rows:?}"
+    );
+    assert!(
+        rows[2].starts_with('╰') && rows[2].ends_with('╯'),
+        "{rows:?}"
+    );
+    assert!(
+        rows[0].chars().count() == rows[2].chars().count(),
+        "the rules are different widths: {rows:?}"
+    );
+    // The middle row is closed at both ends, as the bar's content row is.
+    assert!(
+        rows[1].starts_with('│') && rows[1].ends_with('│'),
+        "{rows:?}"
+    );
+
+    let row = &rows[1];
     for label in ["wpm", "acc", "time"] {
         assert!(
             row.contains(label),
@@ -594,13 +626,15 @@ fn bar_row(app: &App, buffer: &Buffer) -> String {
     area_text(buffer, layout_of(app, buffer).bar)
 }
 
-/// Every mode draws a whole bar, with nothing missing off the right edge.
+/// Every mode draws a whole bar, or no bar at all.
 ///
-/// Quote mode is the tightest: its right card is as wide as the mode card, so it
-/// is the one that cannot be centred in 80 columns and falls back to being packed
-/// against the left edge. It still has to be *there*.
+/// Quote mode is the exception and it is not the layout's fault: its lengths are
+/// `all short medium long thicc`, and `1fr auto 1fr` has to fit that on *both* sides
+/// of the modes, which is eighty-seven columns. Every other mode fits eighty, with
+/// its glyphs dropped when it cannot afford them. The point of the test is that a
+/// mode is never drawn *half* — either the whole box is there or none of it is.
 #[test]
-fn every_mode_draws_a_complete_bar_in_eighty_columns() {
+fn every_mode_draws_a_whole_bar_or_no_bar() {
     for mode in [
         monkeytuipe::config::Mode::Time,
         monkeytuipe::config::Mode::Words,
@@ -611,6 +645,13 @@ fn every_mode_draws_a_complete_bar_in_eighty_columns() {
         let app = in_mode(mode);
         let buffer = render(&app, 80, 20);
         let bar = bar_row(&app, &buffer);
+        if bar.trim().is_empty() {
+            // No bar — and no rows reserved for one.
+            assert_eq!(app.bar().rows(80), 0, "{mode:?} reserved rows for nothing");
+            continue;
+        }
+        // The box is five rows, or nothing.
+        assert_eq!(app.bar().rows(80), 5, "{mode:?}: not five rows");
         for expected in ["time", "words", "quote", "zen", "custom"] {
             assert!(
                 bar.contains(expected),
@@ -643,22 +684,32 @@ fn every_mode_draws_a_complete_bar_in_eighty_columns() {
     }
 }
 
-/// The cards are separate things, with something between them. Three runs of text
-/// with nothing in the gaps read as one sentence, and the grouping is the thing
-/// being copied from the site.
+/// The three cells are separate things, with a line between them rather than a gap.
+///
+/// It used to be a gap of two spaces and no divider — three separate cards. A gap is
+/// a weaker signal than a line: it says "there is space here", where a divider says
+/// "these are three different groups of settings", which is the thing the grouping is
+/// for. And a run of text with nothing but spaces between it reads as one sentence.
 #[test]
-fn the_cards_are_separated_by_something() {
+fn the_cells_are_separated_by_a_divider_with_room_either_side() {
     let app = in_mode(monkeytuipe::config::Mode::Time);
-    let buffer = render(&app, 80, 20);
+    let buffer = render(&app, 100, 20);
     let bar = bar_row(&app, &buffer);
+    // Three inner rows, each with a border on both sides and a divider between each
+    // pair of cells: three rows of four.
+    assert_eq!(
+        bar.matches('│').count(),
+        12,
+        "the box is not drawn: {bar:?}"
+    );
     for boundary in ["numbers", "custom"] {
         let at = bar
             .find(boundary)
-            .unwrap_or_else(|| panic!("no {boundary}"));
+            .unwrap_or_else(|| panic!("no {boundary} in {bar:?}"));
         let after = &bar[at + boundary.len()..];
         assert!(
-            after.starts_with("  "),
-            "nothing between {boundary:?} and the next card: {bar:?}"
+            after.starts_with(" │"),
+            "nothing between {boundary:?} and the next cell: {bar:?}"
         );
     }
 }
@@ -976,7 +1027,7 @@ fn i_opens_the_window_off_the_test_and_types_on_it() {
     assert!(typed.contains('i'), "i did not reach the words: {typed}");
 }
 
-// ---- the "press any key" hint ------------------------------------------
+// ---- the "press shift+enter" hint -------------------------------------
 
 /// Before the first keystroke there is a line saying that a key starts the test.
 ///
@@ -989,7 +1040,10 @@ fn i_opens_the_window_off_the_test_and_types_on_it() {
 fn before_the_first_key_there_is_a_hint_saying_one_starts_the_test() {
     let app = in_mode(monkeytuipe::config::Mode::Time);
     let text = lines(&render(&app, 80, 24)).join("\n");
-    assert!(text.contains("press any key to start typing"), "{text}");
+    assert!(
+        text.contains("press shift+enter to enter a typing mode"),
+        "{text}"
+    );
 }
 
 /// And it is gone once there is input. An overlay over a test in progress is a
@@ -1002,7 +1056,7 @@ fn the_hint_goes_away_once_the_test_starts() {
         app.type_char(c);
     }
     let text = lines(&render(&app, 80, 24)).join("\n");
-    assert!(!text.contains("press any key"), "{text}");
+    assert!(!text.contains("press shift+enter"), "{text}");
 }
 
 /// The words stay readable under it. A box drawn over the words hides them, and a
@@ -1019,7 +1073,7 @@ fn the_words_are_readable_with_the_hint_up() {
     let all = lines(&buffer);
     let hint_row = all
         .iter()
-        .position(|line| line.contains("press any key"))
+        .position(|line| line.contains("press shift+enter"))
         .expect("the hint");
     let words_row = all
         .iter()
@@ -1089,7 +1143,7 @@ fn the_hint_survives_a_terminal_with_no_room_for_a_row() {
         let buffer = render(&app, width, height);
         let all = lines(&buffer);
         assert!(
-            all.iter().any(|line| line.contains("press any key")),
+            all.iter().any(|line| line.contains("press shift+enter")),
             "no hint on a {width}x{height} terminal: {all:?}"
         );
     }
@@ -1127,7 +1181,7 @@ fn russian_is_actually_russian_on_the_typing_screen() {
         "слова",      // words
         "дзен",       // zen
         "точн",       // acc
-        "нажмите любую клавишу",
+        "нажмите shift+enter",
         "esc команды",
     ] {
         assert!(
@@ -1141,7 +1195,7 @@ fn russian_is_actually_russian_on_the_typing_screen() {
     for said in [
         "punctuation",
         "esc commands",
-        "press any key",
+        "press shift+enter",
         "settings",
         "difficulty",
     ] {
@@ -1226,14 +1280,16 @@ fn the_bar_is_in_russian_too() {
 }
 
 /// A quote test in Russian needs more columns than a quote test in English —
-/// «все короткие средние длинные толстые» is nine wider than
-/// `all short medium long thicc` — so the bar falls back to two rows rather than
-/// disappearing. A bar that vanishes for half the users is a bar most of them
-/// never see.
+/// «все короткие средние длинные толстые» is much wider than
+/// `all short medium long thicc` — and the bar is either the whole box or none of it.
+///
+/// It used to fall back to two rows with the lengths below, which is a bar that
+/// changes shape as the window narrows and whose controls move. A hundred and thirteen
+/// columns is the honest minimum for that one case, and the test is here to say so
+/// rather than to let somebody find it by resizing a window.
 #[test]
-fn a_russian_quote_bar_takes_two_rows_rather_than_vanishing() {
+fn a_russian_quote_bar_states_its_width_instead_of_becoming_two_rows() {
     use monkeytuipe::i18n::Lang;
-    let app = in_mode(monkeytuipe::config::Mode::Quote);
     let mut russian = App::new(
         {
             let mut config = Config::default();
@@ -1244,27 +1300,26 @@ fn a_russian_quote_bar_takes_two_rows_rather_than_vanishing() {
         PathBuf::from("/nonexistent/config.toml"),
     );
     russian.set_words(vec!["one".to_owned()]);
-    let _ = app;
-    let buffer = render(&russian, 80, 24);
-    let bar = area_text(&buffer, layout_of(&russian, &buffer).bar);
-    let rows: Vec<&str> = bar.lines().filter(|line| !line.trim().is_empty()).collect();
-    assert!(rows.len() >= 2, "the bar is on one row: {bar:?}");
-    // The modes are still on the first row, and still centred.
-    assert!(
-        rows[0].contains("дзен"),
-        "the modes are not on the first row: {bar:?}"
+    assert_eq!(
+        russian.bar().rows(80),
+        0,
+        "the Russian quote bar was drawn at 80 columns"
     );
-    // The length moved below.
+    // One column at a time, so the number in the assertion above is the real one.
+    assert_eq!(
+        russian.bar().narrowest_with(false),
+        113,
+        "the Russian quote floor moved"
+    );
+    let buffer = render(&russian, 113, 24);
+    let bar = area_text(&buffer, layout_of(&russian, &buffer).bar);
+    assert!(bar.contains("дзен"), "the modes are missing: {bar:?}");
     assert!(
         bar.contains("толстые"),
         "the quote lengths are gone: {bar:?}"
     );
-    // And the screen reserved the rows it drew.
-    assert_eq!(
-        bar_rows(&russian, 80),
-        2,
-        "the reserved rows and the drawn rows differ"
-    );
+    // And the screen reserved the five rows it drew, never two.
+    assert_eq!(bar_rows(&russian, 113), 5, "the box is not five rows");
 }
 
 /// The settings screen is where the language is chosen, so it has to be the screen

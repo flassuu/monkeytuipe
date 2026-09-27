@@ -63,6 +63,52 @@ impl Block {
     pub const ALL: [Block; 3] = [Block::Left, Block::Centre, Block::Right];
 }
 
+/// The Nerd Font glyph in front of each kind of button.
+///
+/// Eight, because the bar has eight kinds of button the user has to tell apart at a
+/// glance: the two toggles, the five modes, and the wrench. The length card gets
+/// none — `15 30 60 120` is a row of numbers and a glyph in front of each one would
+/// be eight glyphs saying nothing.
+///
+/// Not translated and not configurable. A glyph is a name for a thing, the same way
+/// `gruvbox` is a name in both languages, and the whole point is that the bar is
+/// scannable — an icon set that a user's font does not have is a row of empty boxes,
+/// which is why these are named for what they are rather than for where they came
+/// from.
+pub mod icon {
+    /// `nf-fa-at` — the `@`, for punctuation.
+    pub const PUNCTUATION: &str = "\u{f1e0}";
+    /// `nf-fa-hashtag` — the `#`, for numbers.
+    pub const NUMBERS: &str = "\u{f292}";
+    /// `nf-md-clock_time_four` — for the timed test.
+    pub const TIME: &str = "\u{f1142}";
+    /// `nf-fa-font` — a letter `A`, for counting words.
+    pub const WORDS: &str = "\u{f031}";
+    /// `nf-fa-quote_left` — a quotation mark, for a published passage.
+    pub const QUOTE: &str = "\u{f10e}";
+    /// `nf-fa-mountain` — for the test with no end.
+    pub const ZEN: &str = "\u{f0f7}";
+    /// `nf-fa-wrench` — for a passage of the user's own.
+    pub const CUSTOM: &str = "\u{f0ad}";
+    /// `nf-fa-screwdriver_wrench` — for a length that is not a preset.
+    pub const OTHER: &str = "\u{f584}";
+
+    /// The glyph for a test mode, or nothing for a length button.
+    ///
+    /// A function rather than a table because the five mode buttons all share one
+    /// [`Field`] — `Field::Mode` says *which kind of setting* and not *which
+    /// setting* — so a table keyed on the field would give all five the same glyph.
+    pub fn for_mode(mode: crate::config::Mode) -> &'static str {
+        match mode {
+            crate::config::Mode::Time => TIME,
+            crate::config::Mode::Words => WORDS,
+            crate::config::Mode::Quote => QUOTE,
+            crate::config::Mode::Zen => ZEN,
+            crate::config::Mode::Custom => CUSTOM,
+        }
+    }
+}
+
 /// One button in a card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Button {
@@ -74,6 +120,12 @@ pub struct Button {
     /// button needed the app to draw itself, which is the coupling the build-time
     /// split is there to avoid.
     pub label: String,
+    /// The Nerd Font glyph in front of the label, or empty for a length.
+    ///
+    /// Carried rather than looked up, for the same reason the label is: the render
+    /// must not have to know which mode a button is to draw it, or the same button
+    /// would need two answers depending on who asked.
+    pub icon: &'static str,
     /// What it changes.
     pub field: Field,
     pub active: bool,
@@ -86,8 +138,20 @@ pub struct Button {
 }
 
 impl Button {
-    fn width(&self) -> usize {
-        self.label.chars().count()
+    /// The button's drawn width: the glyph, a space, and the label.
+    ///
+    /// The glyph is counted by characters, not bytes, because a Nerd Font glyph is
+    /// three bytes of UTF-8 and one cell — counting bytes is how a bar with icons
+    /// ends up a third wider than the space it was given.
+    ///
+    /// `icons` is false when the terminal is too narrow to afford them, and then the
+    /// glyph costs nothing at all rather than being drawn and clipped.
+    fn width(&self, icons: bool) -> usize {
+        let label = self.label.chars().count();
+        if !icons || self.icon.is_empty() {
+            return label;
+        }
+        label + self.icon.chars().count() + 1
     }
 }
 
@@ -107,11 +171,11 @@ impl Card {
     ///
     /// `gap` is the space between buttons, `pad` the horizontal padding. A card
     /// is `pad + button + gap + button + … + pad`.
-    pub fn width(&self, gap: usize, pad: usize) -> usize {
+    pub fn width(&self, gap: usize, pad: usize, icons: bool) -> usize {
         if self.buttons.is_empty() {
             return 0;
         }
-        let buttons: usize = self.buttons.iter().map(Button::width).sum();
+        let buttons: usize = self.buttons.iter().map(|b| b.width(icons)).sum();
         buttons + gap * (self.buttons.len() - 1) + pad * 2
     }
 }
@@ -236,12 +300,14 @@ impl Bar {
             let disabled = state.mode == ConfigMode::Quote;
             left.push(Button {
                 label: tr(state.ui_language, crate::i18n::Key::Punctuation),
+                icon: icon::PUNCTUATION,
                 field: Field::Punctuation,
                 active: state.punctuation,
                 disabled,
             });
             left.push(Button {
                 label: tr(state.ui_language, crate::i18n::Key::Numbers),
+                icon: icon::NUMBERS,
                 field: Field::Numbers,
                 active: state.numbers,
                 disabled,
@@ -253,6 +319,7 @@ impl Bar {
                 for seconds in bar::TIMES {
                     right.push(Button {
                         label: seconds.to_string(),
+                        icon: "",
                         field: Field::Time,
                         active: state.time == seconds,
                         disabled: false,
@@ -263,6 +330,7 @@ impl Bar {
                 // in effect.
                 right.push(Button {
                     label: tr(state.ui_language, crate::i18n::Key::Other),
+                    icon: icon::OTHER,
                     field: Field::TimeCustom,
                     active: !bar::TIMES.contains(&state.time),
                     disabled: false,
@@ -272,6 +340,7 @@ impl Bar {
                 for words in bar::WORD_COUNTS {
                     right.push(Button {
                         label: words.to_string(),
+                        icon: "",
                         field: Field::Words,
                         active: state.words == words,
                         disabled: false,
@@ -279,6 +348,7 @@ impl Bar {
                 }
                 right.push(Button {
                     label: tr(state.ui_language, crate::i18n::Key::Other),
+                    icon: icon::OTHER,
                     field: Field::WordsCustom,
                     active: !bar::WORD_COUNTS.contains(&state.words),
                     disabled: false,
@@ -287,6 +357,7 @@ impl Bar {
             ConfigMode::Quote => {
                 right.push(Button {
                     label: tr(state.ui_language, crate::i18n::Key::QuoteAll),
+                    icon: "",
                     field: Field::QuoteLength,
                     active: state.quote_length == bar::QuoteLength::All,
                     disabled: false,
@@ -294,6 +365,7 @@ impl Bar {
                 for length in bar::QUOTE_LENGTHS.iter().skip(1) {
                     right.push(Button {
                         label: tr(state.ui_language, length.key()),
+                        icon: "",
                         field: Field::QuoteLength,
                         active: state.quote_length == *length,
                         disabled: false,
@@ -310,6 +382,7 @@ impl Bar {
                             crate::i18n::Key::Add
                         },
                     ),
+                    icon: "",
                     field: Field::CustomText,
                     active: state.has_custom_text,
                     disabled: false,
@@ -324,6 +397,7 @@ impl Bar {
             .iter()
             .map(|mode| Button {
                 label: tr(state.ui_language, mode.key()),
+                icon: icon::for_mode(*mode),
                 field: Field::Mode,
                 active: *mode == state.mode,
                 disabled: false,
@@ -346,318 +420,213 @@ impl Bar {
             .unwrap_or(0);
         bar
     }
+    /// The rows the bar occupies when it is drawn: a border, a blank, the
+    /// settings, a blank, a border.
+    ///
+    /// Five, always, or nothing at all. The blank rows are what make it a *frame
+    /// around* the settings rather than a strip of text with a rule over it, and
+    /// they are why this is one number instead of the ladder it replaced.
+    pub const ROWS: u16 = 5;
 
     /// Renders the bar into `width` columns, or `None` if it does not fit.
     ///
-    /// The mode card is **centred on its own**, which is what the site's
-    /// `grid-cols-[1fr_auto_1fr]` does: the two `1fr` columns absorb whatever the
-    /// side cards do not use, so the mode buttons stay in the same place whether
-    /// the bar has four time presets or one quote length. Centring the whole
-    /// cluster instead moves every button each time the mode changes, which is
-    /// the one thing a settings bar must not do.
+    /// One box, three cells, full width. Each cell holds one group of buttons,
+    /// centred in its own third, with a divider between them:
     ///
-    /// The left card is right-aligned against the mode card — `place-self-end` —
-    /// and the right card is left-aligned against it, so the three read as one
-    /// strip that grows in the middle.
+    /// ```text
+    /// ╭──────────────────────────────────────────╮
+    /// │                   │                      │
+    /// │  pun num           │  time words quote …  │  15 30 60 120 other
+    /// │                   │                      │
+    /// ╰──────────────────────────────────────────╯
+    /// ```
+    ///
+    /// This replaced a four-step degradation ladder — padded and centred, unpadded
+    /// and centred, packed against the left edge, then two rows — and the ladder
+    /// was a mistake twice over. Each step asked the same question of the same
+    /// cells, so there were four places where the answer could be wrong; and every
+    /// step but the first moved the buttons, so the mode card was not in the same
+    /// place twice on a terminal narrower than ninety columns. A settings bar whose
+    /// controls move when you resize the window is a bar you have to re-find.
+    ///
+    /// Now the box is the full width, the cells take their own content and share the
+    /// slack, and there is one question left: does it fit. It does not, the bar is
+    /// not drawn — a truncated bar hides settings, and hiding a setting silently is
+    /// worse than not showing it at all.
+    ///
+    /// The one concession to narrow terminals is the glyphs. They are decoration and
+    /// the labels are content, so when the glyphs would cost the bar entirely they
+    /// are the thing that goes: a bar without icons on a 92-column terminal beats no
+    /// bar at all, and the icons come back the moment there is room. This is the one
+    /// degradation step, and it is a single boolean rather than a ladder — nothing
+    /// moves when it happens, which was the ladder's real sin.
     pub fn render(&self, width: u16, theme: Theme) -> Option<Vec<Line<'static>>> {
-        if width == 0 {
+        let width = width as usize;
+        let icons = width >= self.narrowest();
+        if !icons && width < self.narrowest_with(false) {
             return None;
         }
-        // Three attempts, in the order they are worth: padded and centred, then
-        // unpadded and centred, then unpadded and packed against the left edge.
-        // The first is what the site looks like. The second gives up the padding.
-        // The third gives up the centring, which costs the mode buttons their
-        // fixed place — so it is last, and only for a terminal that could not
-        // have the bar otherwise.
-        for attempt in [
-            Attempt {
-                m: Metrics::ROOMY,
-                placement: Placement::Centred,
-            },
-            Attempt {
-                m: Metrics::COMPACT,
-                placement: Placement::Centred,
-            },
-            Attempt {
-                m: Metrics::COMPACT,
-                placement: Placement::Packed,
-            },
-        ] {
-            if let Some(lines) = self.render_at(width, theme, attempt) {
-                return Some(lines);
-            }
-        }
-        // Nothing fits on one row. Two rows is better than no bar: the length card
-        // moves below the modes rather than the whole strip disappearing. This is
-        // what a Russian quote test needs — «все короткие средние длинные толстые»
-        // is nine columns wider than `all short medium long thicc` — and it is also
-        // what a sixty-column English terminal needs.
-        self.render_wrapped(width, theme)
-    }
 
-    /// The two-row form: the modes and the toggles on one row, the length on the
-    /// next.
-    ///
-    /// The modes stay centred on the first row, because that is the part of the
-    /// bar the user is looking at, and the length is right-aligned under the row
-    /// rather than centred — a centred length under a centred mode looks like two
-    /// separate bars.
-    fn render_wrapped(&self, width: u16, theme: Theme) -> Option<Vec<Line<'static>>> {
-        let m = Metrics::COMPACT;
-        let used = |card: &Card| card.width(m.gap, m.pad);
-        // The first row is the toggles and the modes, and must fit on its own.
-        let top = used(&self.left) + used(&self.centre) + m.card_gap;
-        let bottom = used(&self.right);
-        if top > width as usize || bottom > width as usize || width == 0 {
-            return None;
-        }
+        // Two borders and two dividers are not content.
+        let inner = width - 4;
+        // The widths of the three cells: `1fr auto 1fr`, which is the site's own
+        // grid and the only arrangement in which the modes stay put.
+        //
+        // The centre cell is sized to its own content plus a space against each of
+        // its two dividers, and the two side cells split what is left equally. That
+        // is not a layout preference, it is the property the bar has to have: the
+        // centre's start is `side + 2` and `side` depends only on the terminal width
+        // and the centre's own width, so changing the mode — which changes what the
+        // side cells hold — cannot move the modes. An earlier version shared the
+        // slack between all three cells, and pressing `j` twice moved the mode
+        // buttons eight columns to the left, which is a settings bar the user has to
+        // find again every time they change a setting.
+        let centre_w = self.centre.width(CELL_GAP, 0, icons) + CELL_BREATH;
+        let side_w = inner.saturating_sub(centre_w) / 2;
+        // An odd column goes to the left, so the right-hand divider is as close to
+        // the edge as the geometry allows and the left-hand padding absorbs the rest.
+        let cells = [side_w + (inner - centre_w - side_w * 2), centre_w, side_w];
+        // The remainder goes to the left cell, so the three differ by at most one
+        // column and a divider does not dance when the width changes by one.
+
         let counts = [
             self.left.buttons.len(),
             self.centre.buttons.len(),
             self.right.buttons.len(),
         ];
-        let (selected_card, within) = selection_in(&counts, self.selected);
+        let (selected_cell, within) = selection_in(&counts, self.selected);
+        let cards = [&self.left, &self.centre, &self.right];
 
-        let centre_at = (width as usize).saturating_sub(used(&self.centre)) / 2;
-        let left_at = centre_at.saturating_sub(m.card_gap + used(&self.left));
-        let mut spans: Vec<Span<'static>> = vec![Span::raw(" ".repeat(left_at))];
-        let mut at = left_at;
-        if !self.left.buttons.is_empty() {
-            let card = render_card(
-                &self.left.buttons,
-                (selected_card == 0).then_some(within),
+        let mut content: Vec<Vec<Span<'static>>> = Vec::new();
+        for (index, card) in cards.iter().enumerate() {
+            content.push(render_cell(
+                &card.buttons,
+                (selected_cell == index).then_some(within),
                 theme,
-                m,
-            );
-            at += card.width();
-            spans.extend(card.spans);
-        }
-        spans.push(Span::raw(" ".repeat(centre_at.saturating_sub(at))));
-        let centre = render_card(
-            &self.centre.buttons,
-            (selected_card == 1).then_some(within),
-            theme,
-            m,
-        );
-        spans.extend(centre.spans);
-        pad_to(&mut spans, width as usize);
-
-        // The length card, right-aligned, on its own row.
-        let right = render_card(
-            &self.right.buttons,
-            (selected_card == 2).then_some(within),
-            theme,
-            m,
-        );
-        let right_at = (width as usize).saturating_sub(right.width());
-        let mut second: Vec<Span<'static>> = vec![Span::raw(" ".repeat(right_at))];
-        second.extend(right.spans);
-        pad_to(&mut second, width as usize);
-
-        Some(vec![Line::from(spans), Line::from(second)])
-    }
-
-    /// The narrowest the two-row form can be drawn.
-    ///
-    /// The first row is the toggles and the modes, the second is the length, so
-    /// each row is its own constraint and the bar needs the wider of the two. In
-    /// practice that is the modes — a five-button card is wider than a length card
-    /// in every language — but it is the wider of the two, not an assumption.
-    pub fn two_row_minimum(&self) -> usize {
-        let m = Metrics::COMPACT;
-        let top = self.left.width(m.gap, m.pad) + self.centre.width(m.gap, m.pad) + m.card_gap;
-        let bottom = self.right.width(m.gap, m.pad);
-        top.max(bottom)
-    }
-
-    /// How many rows the bar takes at this width: one if it fits on one, two if it
-    /// fits on two, and none if it does not fit at all.
-    ///
-    /// Asked by the screen to decide how much room to leave, so the answer and the
-    /// drawing cannot disagree about it.
-    pub fn rows(&self, width: u16) -> u16 {
-        let theme = crate::config::theme::ThemeName::Monkeytype.resolve();
-        match self.render(width, theme) {
-            Some(lines) => u16::try_from(lines.len()).unwrap_or(u16::MAX),
-            None => 0,
-        }
-    }
-
-    /// The narrowest width at which the bar can still be drawn.
-    ///
-    /// Centring the mode card needs room for the *widest* side card on both
-    /// sides of it, so the requirement is not the sum of the three widths — it is
-    /// the middle one plus twice the larger outer one.
-    pub fn narrowest(&self) -> usize {
-        let widest = self
-            .left
-            .width(Metrics::COMPACT.gap, Metrics::COMPACT.pad)
-            .max(self.right.width(Metrics::COMPACT.gap, Metrics::COMPACT.pad));
-        let centre = self
-            .centre
-            .width(Metrics::COMPACT.gap, Metrics::COMPACT.pad);
-        centre + Metrics::COMPACT.card_gap * 2 + widest * 2
-    }
-
-    /// The width the packed form needs, which is simply the sum of the three
-    /// cards and the gaps between them.
-    pub fn packed_width(&self) -> usize {
-        self.left.width(Metrics::COMPACT.gap, Metrics::COMPACT.pad)
-            + self
-                .centre
-                .width(Metrics::COMPACT.gap, Metrics::COMPACT.pad)
-            + self.right.width(Metrics::COMPACT.gap, Metrics::COMPACT.pad)
-            + Metrics::COMPACT.card_gap * 2
-    }
-
-    /// One attempt at the layout: fixed spacing, fixed placement.
-    fn render_at(&self, width: u16, theme: Theme, attempt: Attempt) -> Option<Vec<Line<'static>>> {
-        let m = attempt.m;
-        let used = |card: &Card| card.width(m.gap, m.pad);
-        let (left_w, centre_w, right_w) = (used(&self.left), used(&self.centre), used(&self.right));
-        if left_w + centre_w + right_w + m.card_gap * 2 > width as usize {
-            return None;
+                icons,
+            ));
         }
 
-        // Which card the selection is in, and where within it.
-        let counts = [
-            self.left.buttons.len(),
-            self.centre.buttons.len(),
-            self.right.buttons.len(),
-        ];
-        let (selected_card, within) = selection_in(&counts, self.selected);
-
-        // Centred puts the mode card in the middle of the screen and grows the
-        // side cards towards the edges; packed lays the three out in order from
-        // the left. The mode card's offset is `centre_at` either way, and that is
-        // the whole point: within a placement the buttons do not move when the
-        // mode changes.
-        let (left_at, centre_at, right_at) = match attempt.placement {
-            Placement::Centred => {
-                let centre_at = (width as usize).saturating_sub(centre_w) / 2;
-                if centre_at < m.card_gap + left_w {
-                    return None;
+        // One inner row, either carrying the settings or blank. The dividers run
+        // through the blank rows too: a divider that stops short of the corners
+        // reads as three separate boxes rather than one box in three compartments,
+        // and the whole point of the frame is that it is one bar.
+        //
+        // The three cells are aligned the way the site aligns them: the centre is
+        // `auto` and sits on its own, the left cell is `place-self-end` and the right
+        // is `place-self-start`, so both hug the centre. Centring all three in equal
+        // thirds is prettier and wrong — it is what makes the modes jump when the
+        // mode changes, because the side cells change width and the slack they share
+        // moves the centre with them.
+        let inner_row = |content: Option<&[Vec<Span<'static>>]>| {
+            let mut spans: Vec<Span<'static>> = vec![Span::styled(BORDER, frame_style(theme))];
+            for (index, cell_width) in cells.iter().enumerate() {
+                match content {
+                    Some(content) => {
+                        let cell = &content[index];
+                        let used: usize = cell.iter().map(|s| s.content.chars().count()).sum();
+                        let slack = cell_width.saturating_sub(used);
+                        // The outer edge keeps all its slack, which is what puts a
+                        // side cell against the middle; the divider-facing edge keeps
+                        // one column, so the two settings that share that border are
+                        // not pressed against it. The centre splits the difference.
+                        let (before, after) = match index {
+                            0 => (slack.saturating_sub(CELL_BREATH), CELL_BREATH.min(slack)),
+                            1 => (slack / 2, slack - slack / 2),
+                            _ => (CELL_BREATH.min(slack), slack.saturating_sub(CELL_BREATH)),
+                        };
+                        spans.push(Span::raw(" ".repeat(before)));
+                        spans.extend(cell.iter().cloned());
+                        spans.push(Span::raw(" ".repeat(after)));
+                    }
+                    None => spans.push(Span::raw(" ".repeat(*cell_width))),
                 }
-                if centre_at + centre_w + m.card_gap + right_w > width as usize {
-                    return None;
+                if index < 2 {
+                    spans.push(Span::styled(BORDER, frame_style(theme)));
                 }
-                (
-                    centre_at - m.card_gap - left_w,
-                    centre_at,
-                    centre_at + centre_w + m.card_gap,
-                )
             }
-            Placement::Packed => {
-                let left_at = 0usize;
-                let centre_at = left_at + left_w + m.card_gap;
-                (left_at, centre_at, centre_at + centre_w + m.card_gap)
-            }
+            spans.push(Span::styled(BORDER, frame_style(theme)));
+            Line::from(spans)
         };
 
-        // Every span is placed at a known offset, and the gaps between the cards
-        // are emitted as blanks. They have to be: a card's own padding is one
-        // column each side, so without the gap the compact form would put
-        // `numbers` and `time` next to each other with nothing between them and
-        // the bar would read as one run of text.
-        let mut spans: Vec<Span<'static>> = vec![Span::raw(" ".repeat(left_at))];
-        let mut at = left_at;
-        let gap_to = |at: usize, target: usize| Span::raw(" ".repeat(target.saturating_sub(at)));
-        if !self.left.buttons.is_empty() {
-            let card = render_card(
-                &self.left.buttons,
-                (selected_card == 0).then_some(within),
-                theme,
-                m,
-            );
-            at += card.width();
-            spans.extend(card.spans);
+        // The top and bottom rules: one continuous run between two corners, so
+        // `width - 2` and not `width - 4`. Getting that wrong draws a box two columns
+        // narrower than the rows inside it.
+        let rule = |left: &'static str, right: &'static str| {
+            Line::from(vec![
+                Span::styled(left, frame_style(theme)),
+                Span::styled("─".repeat(width - 2), frame_style(theme)),
+                Span::styled(right, frame_style(theme)),
+            ])
+        };
+
+        Some(vec![
+            rule("╭", "╮"),
+            inner_row(None),
+            inner_row(Some(&content)),
+            inner_row(None),
+            rule("╰", "╯"),
+        ])
+    }
+
+    /// The narrowest width at which the box can still be drawn, glyphs and all.
+    ///
+    /// `1fr auto 1fr`, so the binding constraint is the centre cell plus *twice* the
+    /// wider side cell — the sides have to fit on both sides of the modes, which is
+    /// the site's own arithmetic and the reason its bar needs a wide terminal too.
+    pub fn narrowest(&self) -> usize {
+        self.narrowest_with(true)
+    }
+
+    /// [`Self::narrowest`] with a choice about the glyphs.
+    ///
+    /// Two numbers rather than one, because the glyphs are optional and the bar's
+    /// minimum width is therefore two different facts: the width at which it can be
+    /// drawn as designed, and the width at which it can be drawn at all.
+    pub fn narrowest_with(&self, icons: bool) -> usize {
+        let centre = self.centre.width(CELL_GAP, 0, icons) + CELL_BREATH;
+        // One extra column on each side for the gap against the divider, so the two
+        // settings that share that border are not pressed against it.
+        let side = self
+            .left
+            .width(CELL_GAP, 0, icons)
+            .max(self.right.width(CELL_GAP, 0, icons))
+            + CELL_BREATH;
+        centre + side * 2 + 4
+    }
+
+    /// How many rows the screen should reserve for the bar.
+    ///
+    /// [`Self::ROWS`], or nothing when the bar cannot be drawn — the screen asks
+    /// this rather than assuming, so a terminal too narrow for the box does not
+    /// reserve five empty rows with nothing in them.
+    pub fn rows(&self, width: u16) -> u16 {
+        if self
+            .render(width, crate::config::theme::ThemeName::Monkeytype.resolve())
+            .is_some()
+        {
+            Self::ROWS
+        } else {
+            0
         }
-        spans.push(gap_to(at, centre_at));
-        at = centre_at;
-        let centre = render_card(
-            &self.centre.buttons,
-            (selected_card == 1).then_some(within),
-            theme,
-            m,
-        );
-        at += centre.width();
-        spans.extend(centre.spans);
-        if !self.right.buttons.is_empty() {
-            spans.push(gap_to(at, right_at));
-            let card = render_card(
-                &self.right.buttons,
-                (selected_card == 2).then_some(within),
-                theme,
-                m,
-            );
-            spans.extend(card.spans);
-        }
-        let _ = at;
-        // Pad out to the full width, so the bar occupies a fixed region instead
-        // of one that changes width with its content.
-        pad_to(&mut spans, width as usize);
-        Some(vec![Line::from(spans)])
     }
 }
 
-/// Pads a row out to `width` columns.
-///
-/// The bar occupies a fixed region rather than one that changes width with its
-/// content, which is what lets the screen reserve a fixed number of rows and what
-/// stops a trailing space from being dropped somewhere upstream.
-fn pad_to(spans: &mut Vec<Span<'static>>, width: usize) {
-    let drawn: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    if let Some(rest) = width.checked_sub(drawn) {
-        spans.push(Span::raw(" ".repeat(rest)));
-    }
-}
-
-/// Where the mode card sits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Placement {
-    /// In the middle of the screen, as the site's `1fr auto 1fr` does. Needs room
-    /// for the widest side card on both sides of the mode card.
-    Centred,
-    /// In order from the left edge. Needs only the sum of the widths, which is
-    /// what makes the bar fit on a terminal the centred form does not.
-    Packed,
-}
-
-/// One attempt at the bar.
-#[derive(Debug, Clone, Copy)]
-struct Attempt {
-    m: Metrics,
-    placement: Placement,
-}
-
-/// The spacing of one attempt at the bar.
-///
-/// Padding and gaps are the first thing to go when the terminal is narrow,
-/// because a bar with no padding is still a bar and a bar that does not fit is
-/// not one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Metrics {
-    gap: usize,
-    pad: usize,
-    card_gap: usize,
-}
-
-impl Metrics {
-    /// Padding inside a card, a space between buttons, two between cards.
-    const ROOMY: Metrics = Metrics {
-        gap: 1,
-        pad: 1,
-        card_gap: 2,
-    };
-    /// No padding inside a card, but the gap between cards stays: two cards with
-    /// a single space between them read as one run of text, and a bar that cannot
-    /// be told apart is not a bar.
-    const COMPACT: Metrics = Metrics {
-        gap: 1,
-        pad: 0,
-        card_gap: 2,
-    };
-}
+// The ladder this replaced, kept as a note rather than as code.
+//
+// `Placement`, `Attempt` and `Metrics` existed to try four layouts in turn: padded
+// and centred, unpadded and centred, packed against the left edge, then two rows
+// with the lengths below. They are gone, and the reason is worth more than the code.
+//
+// Each step asked the same question of the same three cells, so there were four
+// places where the answer could be wrong and no way to tell from the output which
+// one had been used. And every step but the first moved the buttons: on a terminal
+// narrower than about ninety columns the mode card was not in the same place twice,
+// so a settings bar's controls moved when the window was resized. A control that
+// moves is a control the user has to find again.
+//
+// One box, `1fr auto 1fr`, full width, and no bar at all when the content does not
+// fit. The only question left is the one worth asking.
 
 /// Which card the selection falls in, and its index within that card.
 ///
@@ -678,33 +647,57 @@ fn selection_in(counts: &[usize], selected: usize) -> (usize, usize) {
     (0, 0)
 }
 
-/// Renders one card as a bordered, padded line.
-fn render_card(
+/// The vertical divider, which is also the left and right edge of the box.
+///
+/// One constant because the same character is the frame and the separator, and two
+/// literals for one line of drawing is how a box ends up with rounded corners and
+/// square edges.
+const BORDER: &str = "│";
+
+/// The space between two buttons in a cell.
+const CELL_GAP: usize = 1;
+
+/// The space reserved on a cell's side that faces a divider.
+///
+/// One column on each of a cell's divider-facing edges, so `numbers │time` is two
+/// settings with a little air rather than two words sharing a border. The site's
+/// `place-self-end` puts a cell *against* the centre column, and that is what makes
+/// the modes stay put; this is the one column that stops "against" from meaning
+/// "touching".
+const CELL_BREATH: usize = 1;
+
+/// Renders one cell's buttons.
+///
+/// The cell's width is not passed in: the caller knows the three cell widths and is
+/// the authority on where the dividers go, and it centres each cell's spans against
+/// its own width. A cell that padded itself would have to agree with the caller
+/// about the same number, and two places holding one number is how a divider ends up
+/// a column out.
+fn render_cell(
     buttons: &[Button],
     selected_offset: Option<usize>,
     theme: Theme,
-    m: Metrics,
-) -> Line<'static> {
+    icons: bool,
+) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
-    spans.push(Span::styled(" ".repeat(m.pad), card_style(theme)));
     for (index, button) in buttons.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::styled(" ".repeat(m.gap), card_style(theme)));
+            spans.push(Span::raw(" ".repeat(CELL_GAP)));
         }
-        spans.push(button_span(button, Some(index) == selected_offset, theme));
+        spans.push(button_span(
+            button,
+            Some(index) == selected_offset,
+            theme,
+            icons,
+        ));
     }
-    spans.push(Span::styled(" ".repeat(m.pad), card_style(theme)));
-    Line::from(spans)
+    spans
 }
 
-/// The card's background, which on the site is `--sub-alt-color`.
-///
-/// A card needs a background of its own to *be* a card: three runs of text with
-/// gaps between them read as one sentence, and the site's grouping is the thing
-/// being copied here. `surface` is the slot themes keep distinct from the page,
-/// which is exactly what this is.
-fn card_style(theme: Theme) -> Style {
-    Style::default().fg(theme.surface).bg(theme.background)
+/// The frame's colour: the muted one, so the box is present without competing with
+/// the settings inside it.
+fn frame_style(theme: Theme) -> Style {
+    Style::default().fg(theme.muted)
 }
 
 /// A button: on, off, disabled, and whether the arrows are on it.
@@ -718,24 +711,39 @@ fn card_style(theme: Theme) -> Style {
 ///   `opacity: 0.33`; a terminal has no opacity, so the muted colour is the honest
 ///   equivalent, and a disabled control that is also the active one would be
 ///   claiming to be on while refusing to be turned off.
-/// - **selected** — foreground instead of muted, and underlined. Underline rather
-///   than a fill, because the row of labels is what has to stay readable and an
-///   underline marks a position without occupying the cell.
-pub fn button_span(button: &Button, selected: bool, theme: Theme) -> Span<'static> {
+/// - **selected** — the foreground rather than the muted colour, and bold.
+///
+/// The active and selected states are colour and weight only. They used to be
+/// underlined too, which was wrong twice over: a row of labels with rules under
+/// some of them reads as a table of links rather than a row of settings, and on the
+/// `auto` theme — where the foreground sits very close to the muted colour — the
+/// underline was doing most of the work of saying which button the arrows were on.
+///
+/// `icons` is false on a terminal too narrow for the glyphs, and then the label is
+/// drawn alone rather than being pushed off the end of its cell. See
+/// [`Bar::render`].
+pub fn button_span(button: &Button, selected: bool, theme: Theme, icons: bool) -> Span<'static> {
     let style = if button.disabled {
         Style::default().fg(theme.muted)
     } else if button.active {
         Style::default()
             .fg(theme.accent)
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            .add_modifier(Modifier::BOLD)
     } else if selected {
         Style::default()
             .fg(theme.foreground)
-            .add_modifier(Modifier::UNDERLINED)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.muted)
     };
-    Span::styled(button.label.clone(), style)
+    // The glyph and the label are one span, so the two can never be styled
+    // differently — a bold label must not leave a dim icon sitting in front of it.
+    let text = if !icons || button.icon.is_empty() {
+        button.label.clone()
+    } else {
+        format!("{} {}", button.icon, button.label)
+    };
+    Span::styled(text, style)
 }
 
 /// One interface string.
@@ -892,11 +900,19 @@ mod tests {
         );
     }
 
-    /// And it still fits: Russian is longer than English, so a bar that fits in
-    /// one does not automatically fit in the other. A settings bar that only fits
-    /// in English is a settings bar half the users cannot see.
+    /// Eighty columns is the width people are told to aim for, so the bar has to fit
+    /// there — and the glyphs are what it gives up to do it.
+    ///
+    /// Quote mode is the exception, in both languages, and it is a property of the
+    /// words rather than of the layout: the lengths are `all short medium long thicc`
+    /// in English and «все короткие средние длинные толстые» in Russian, and the bar
+    /// has to fit the longer one on *both* sides of the modes. Eighty-eight columns
+    /// is the honest minimum for English and a hundred and thirteen for Russian. The old
+    /// layout answered this by moving the lengths onto a second row, which is a bar
+    /// that changes shape as the window narrows — the thing this design exists to
+    /// stop.
     #[test]
-    fn a_russian_bar_fits_in_eighty_columns_too() {
+    fn the_bar_fits_in_eighty_columns_for_everything_but_a_quote_test() {
         let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
         for mode in [
             ConfigMode::Time,
@@ -905,10 +921,77 @@ mod tests {
             ConfigMode::Zen,
             ConfigMode::Custom,
         ] {
-            let bar = Bar::build(state_in(mode, Lang::Russian));
+            for lang in [Lang::English, Lang::Russian] {
+                let bar = Bar::build(state_in(mode, lang));
+                let without = bar.narrowest_with(false);
+                if mode == ConfigMode::Quote {
+                    let stated = match lang {
+                        Lang::English => 88,
+                        Lang::Russian => 113,
+                    };
+                    assert_eq!(without, stated, "the {lang:?} quote minimum moved");
+                    continue;
+                }
+                assert!(
+                    without <= 80,
+                    "the {mode:?} bar in {lang:?} needs {without} columns without its glyphs"
+                );
+                assert!(
+                    bar.render(80, theme).is_some(),
+                    "the {mode:?} bar in {lang:?} was not drawn at 80 columns"
+                );
+            }
+        }
+    }
+
+    /// The glyphs are the only thing between a bar that fits and one that does not,
+    /// and dropping them costs nothing else: the same labels, the same selection,
+    /// the same five rows, nothing moved and nothing cut off.
+    #[test]
+    fn the_glyphs_are_dropped_before_the_bar_is() {
+        let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
+        let bar = Bar::build(state(ConfigMode::Time));
+        let with_icons = bar.narrowest() as u16;
+        let without = bar.narrowest_with(false) as u16;
+        assert!(without < with_icons, "the glyphs cost nothing?");
+
+        // A column below the designed width: drawn, and drawn without glyphs.
+        let tight = with_icons - 1;
+        assert!(tight >= without, "{tight} is below the floor, {without}");
+        let text = bar.render(tight, theme).expect("it fits without glyphs");
+        let joined: String = text
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            !joined
+                .chars()
+                .any(|c| ('\u{e000}'..='\u{f8ff}').contains(&c)),
+            "a glyph survived at {tight} columns: {joined}"
+        );
+        // Every label is still there, because the glyphs are decoration and the
+        // labels are the settings.
+        for button in bar.buttons() {
             assert!(
-                bar.render(80, theme).is_some(),
-                "the {mode:?} bar does not fit in 80 columns in russian"
+                joined.contains(&button.label),
+                "{} is missing: {joined}",
+                button.label
+            );
+        }
+        assert_eq!(text.len(), 5, "the box changed height without its glyphs");
+
+        // And at the designed width they are all back.
+        let full = bar.render(with_icons, theme).expect("it fits with glyphs");
+        let joined: String = full
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        for glyph in [icon::PUNCTUATION, icon::NUMBERS, icon::TIME] {
+            assert!(
+                joined.contains(glyph),
+                "{glyph:?} is missing at {with_icons} columns"
             );
         }
     }
@@ -1053,12 +1136,14 @@ mod tests {
         button_span(
             &Button {
                 label: "punctuation".to_owned(),
+                icon: icon::PUNCTUATION,
                 field: Field::Punctuation,
                 active,
                 disabled: false,
             },
             selected,
             crate::config::theme::ThemeName::Gruvbox.resolve(),
+            true,
         )
     }
 
@@ -1116,89 +1201,96 @@ mod tests {
         let style = button_span(
             &Button {
                 label: "punctuation".to_owned(),
+                icon: icon::PUNCTUATION,
                 field: Field::Punctuation,
                 active: true,
                 disabled: true,
             },
             false,
             theme,
+            true,
         )
         .style;
         assert_eq!(style.fg, Some(theme.muted));
         assert!(!style.add_modifier.contains(Modifier::BOLD));
     }
 
-    /// A bar that cannot be laid out is not drawn half. A truncated card looks
-    /// like a card with a missing button, and a card with a button missing is worse
-    /// than a bar on two rows.
+    /// A bar that cannot be laid out is not drawn half. A truncated cell looks like
+    /// a group of buttons with one missing, and a setting that is silently absent is
+    /// worse than a bar that is not there.
     #[test]
-    fn a_bar_too_narrow_for_either_form_is_not_drawn_at_all() {
+    fn a_bar_too_narrow_is_not_drawn_at_all() {
         let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
         for mode in [ConfigMode::Time, ConfigMode::Quote, ConfigMode::Zen] {
             for lang in [Lang::English, Lang::Russian] {
                 let bar = Bar::build(state_in(mode, lang));
-                // Not one column under the two-row form's own minimum.
-                for width in 0..bar.two_row_minimum() as u16 {
+                // The floor is the width at which the bar can be drawn at all, glyphs
+                // or not — not the width at which it can be drawn as designed.
+                for width in 0..bar.narrowest_with(false) as u16 {
                     assert!(
                         bar.render(width, theme).is_none(),
                         "the {mode:?} bar in {lang:?} was drawn truncated at {width} columns"
                     );
                 }
-                // And at its minimum it draws, on two rows.
                 assert_eq!(
-                    bar.rows(bar.two_row_minimum() as u16),
-                    2,
-                    "{mode:?} in {lang:?} did not draw at its two-row minimum"
+                    bar.rows(bar.narrowest_with(false) as u16),
+                    5,
+                    "{mode:?} in {lang:?} did not draw at its own floor"
                 );
             }
         }
     }
 
-    /// Two rows is the last form before giving up, and it is what a language with
-    /// longer words needs: «все короткие средние длинные толстые» is nine columns
-    /// wider than `all short medium long thicc`, which is the difference between
-    /// having a bar and not having one.
+    /// The box is five rows: a border, a blank, the settings, a blank, a border.
+    ///
+    /// This replaced a two-row form for narrow terminals, and asserting the exact
+    /// number is the point: the screen reserves rows from
+    /// [`Bar::rows`] and draws from [`Bar::render`], and if those two ever disagree
+    /// the bar overlaps the words or leaves a hole.
     #[test]
-    fn a_bar_that_does_not_fit_on_one_row_moves_the_length_below() {
+    fn the_bar_is_a_five_row_box() {
         let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
-        let russian = Bar::build(state_in(ConfigMode::Quote, Lang::Russian));
-        let lines = russian
-            .render(80, theme)
-            .expect("the bar fits in eighty columns, on one row or two");
-        assert_eq!(
-            lines.len(),
-            2,
-            "the length card did not move to its own row"
-        );
-        assert_eq!(
-            lines.len(),
-            2,
-            "the length card did not move to its own row"
-        );
-        let first: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        let second: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            first.contains("дзен"),
-            "the modes are not on the first row: {first}"
-        );
-        assert!(
-            !first.contains("толстые"),
-            "the length did not move: {first}"
-        );
-        assert!(
-            second.contains("толстые"),
-            "the length is not on the second row: {second}"
-        );
-        // And the modes stay centred, because that is the part being looked at.
-        let at = first.find("дзен").expect("the modes");
-        assert!(
-            at > 20,
-            "the modes are not centred on the first row: {at} in {first}"
-        );
+        for (mode, lang) in [
+            (ConfigMode::Time, Lang::English),
+            (ConfigMode::Quote, Lang::English),
+            (ConfigMode::Quote, Lang::Russian),
+            (ConfigMode::Time, Lang::Russian),
+            (ConfigMode::Zen, Lang::English),
+        ] {
+            let bar = Bar::build(state_in(mode, lang));
+            let width = (bar.narrowest() as u16).max(1);
+            let lines = bar
+                .render(width, theme)
+                .unwrap_or_else(|| panic!("{mode:?} in {lang:?} does not fit in {width}"));
+            assert_eq!(lines.len(), 5, "{mode:?} in {lang:?}: not five rows");
+            let text: Vec<String> = lines
+                .iter()
+                .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect();
+            assert!(
+                text[0].starts_with('╭') && text[0].ends_with('╮'),
+                "the top rule is not a rule: {}",
+                text[0]
+            );
+            assert!(
+                text[4].starts_with('╰') && text[4].ends_with('╯'),
+                "the bottom rule is not a rule: {}",
+                text[4]
+            );
+            // The blank rows still carry the dividers, or it is three boxes.
+            for blank in [&text[1], &text[3]] {
+                assert_eq!(
+                    blank.matches(BORDER).count(),
+                    4,
+                    "a blank row does not have both dividers: {blank}"
+                );
+            }
+        }
     }
 
     /// The number of rows the screen reserves is the number of rows the bar draws,
-    /// asked of the same code.
+    /// asked of the same code — and it is zero when the bar does not fit, so a
+    /// narrow terminal does not reserve five empty rows.
     #[test]
     fn the_reserved_rows_match_the_drawn_rows() {
         let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
@@ -1220,80 +1312,138 @@ mod tests {
         }
     }
 
-    /// Padding is the first thing to go, because a bar with no padding is still a
-    /// bar. 80 columns is the width people are told to aim for, so the bar has to
-    /// fit there.
+    /// The width is the honest one: at the floor the bar is drawn, and one column
+    /// less it is not drawn at all.
+    ///
+    /// There is no third form. It used to be one row, then two rows with the lengths
+    /// below, then nothing — and a bar that changes shape as the window narrows is a
+    /// bar whose controls move, which is worse than no bar.
     #[test]
-    fn the_bar_fits_the_terminal_width_people_are_told_to_aim_for() {
+    fn the_bar_appears_at_its_floor_and_not_one_column_less() {
+        let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
+        for mode in [
+            ConfigMode::Time,
+            ConfigMode::Words,
+            ConfigMode::Quote,
+            ConfigMode::Zen,
+            ConfigMode::Custom,
+        ] {
+            let bar = Bar::build(state(mode));
+            let floor = bar.narrowest_with(false) as u16;
+            assert!(
+                bar.render(floor, theme).is_some(),
+                "the {mode:?} bar does not fit in its own floor, {floor}"
+            );
+            assert!(
+                bar.render(floor - 1, theme).is_none(),
+                "the {mode:?} bar still fits one column below its floor"
+            );
+            assert_eq!(bar.rows(floor), 5);
+            assert_eq!(bar.rows(floor - 1), 0, "rows were reserved for nothing");
+            // And the designed width, with the glyphs, is a real and larger number.
+            assert!(
+                bar.narrowest() > bar.narrowest_with(false),
+                "the {mode:?} bar claims the glyphs are free"
+            );
+        }
+    }
+
+    /// Every button is inside the box at every width that draws it.
+    ///
+    /// The three cells are sized to their own content, so a cell cannot be one
+    /// column narrower than what is in it — but that is arithmetic, and arithmetic
+    /// is what this checks.
+    #[test]
+    fn no_button_is_cut_off_at_the_narrowest_width() {
         let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
         for mode in [
             ConfigMode::Time,
             ConfigMode::Words,
             ConfigMode::Quote,
             ConfigMode::Custom,
-            ConfigMode::Zen,
         ] {
-            let bar = Bar::build(state(mode));
-            assert!(
-                bar.render(80, theme).is_some(),
-                "the {mode:?} bar does not fit in 80 columns"
-            );
+            for lang in [Lang::English, Lang::Russian] {
+                let bar = Bar::build(state_in(mode, lang));
+                let width = bar.narrowest() as u16;
+                let text: String = bar
+                    .render(width, theme)
+                    .unwrap_or_default()
+                    .iter()
+                    .flat_map(|line| line.spans.iter())
+                    .map(|s| s.content.as_ref())
+                    .collect();
+                for button in bar.buttons() {
+                    assert!(
+                        text.contains(&button.label),
+                        "{mode:?} in {lang:?}: {} is missing from the box: {text}",
+                        button.label
+                    );
+                }
+            }
         }
     }
 
-    /// Padding is what makes the bar wider, and it is the first thing given up:
-    /// the compact form is exactly six columns narrower, two per card.
+    /// The five mode buttons carry the five mode glyphs, in order.
+    ///
+    /// Asserted over the buttons rather than against the bar's current mode,
+    /// because the bar's current mode is one of the five and not the answer to
+    /// "what glyph does the words button have" — that is the button's own business.
+    ///
+    /// The length card carries none: `15 30 60 120` is a row of numbers, and a glyph
+    /// in front of each one would be eight glyphs saying nothing.
     #[test]
-    fn padding_is_what_makes_the_bar_wider() {
+    fn the_icons_are_one_column_each_and_only_where_they_mean_something() {
         let bar = Bar::build(state(ConfigMode::Time));
-        let roomy = Metrics::ROOMY.card_gap * 2
-            + bar.left.width(Metrics::ROOMY.gap, Metrics::ROOMY.pad)
-            + bar.centre.width(Metrics::ROOMY.gap, Metrics::ROOMY.pad)
-            + bar.right.width(Metrics::ROOMY.gap, Metrics::ROOMY.pad);
-        let compact = Metrics::COMPACT.card_gap * 2
-            + bar.left.width(Metrics::COMPACT.gap, Metrics::COMPACT.pad)
-            + bar.centre.width(Metrics::COMPACT.gap, Metrics::COMPACT.pad)
-            + bar.right.width(Metrics::COMPACT.gap, Metrics::COMPACT.pad);
-        assert!(roomy > compact, "{roomy} is not wider than {compact}");
-        assert_eq!(roomy - compact, 6, "the difference is not the padding");
+        let modes: Vec<&Button> = bar
+            .buttons()
+            .into_iter()
+            .filter(|b| b.field == Field::Mode)
+            .collect();
+        assert_eq!(modes.len(), 5, "the mode cell does not have five buttons");
+        for (button, mode) in modes.iter().zip([
+            ConfigMode::Time,
+            ConfigMode::Words,
+            ConfigMode::Quote,
+            ConfigMode::Zen,
+            ConfigMode::Custom,
+        ]) {
+            assert_eq!(
+                button.icon,
+                icon::for_mode(mode),
+                "the {mode:?} button has the wrong glyph"
+            );
+        }
+        for button in bar.buttons() {
+            let cells = button.icon.chars().count();
+            assert!(cells <= 1, "{}: a glyph is {cells} cells", button.label);
+            match button.field {
+                Field::Time | Field::Words | Field::QuoteLength | Field::CustomText => {
+                    assert_eq!(button.icon, "", "{} should have no glyph", button.label)
+                }
+                _ => assert_eq!(cells, 1, "{} has no glyph", button.label),
+            }
+        }
     }
 
-    /// Centring the mode card costs more than the sum of the widths, because the
-    /// widest side card has to fit on *both* sides of it. That is the number the
-    /// terminal has to be at least.
+    /// The eight glyphs are eight distinct characters, because two buttons with the
+    /// same icon are one icon.
     #[test]
-    fn centring_costs_more_than_the_sum_of_the_parts() {
-        let bar = Bar::build(state(ConfigMode::Quote));
-        let packed = bar.packed_width();
-        let narrowest = bar.narrowest();
-        assert!(
-            narrowest > packed,
-            "{narrowest} should be more than the packed {packed}"
-        );
-        // And the packed form is what brings quote mode inside 80 columns.
-        assert!(
-            packed <= 80,
-            "the packed quote bar is {packed} columns wide"
-        );
-    }
-
-    /// Centring the mode card costs more than the sum of the widths, so there is a
-    /// width at which the bar is drawn on one row and one column less at which it
-    /// is drawn on two. Neither is "not drawn" — only the two-row form failing is.
-    #[test]
-    fn one_column_less_moves_the_bar_to_two_rows_rather_than_away() {
-        let bar = Bar::build(state(ConfigMode::Quote));
-        let narrowest = bar.narrowest().min(bar.packed_width()) as u16;
-        assert_eq!(
-            bar.rows(narrowest),
-            1,
-            "it fits on one row at its own width"
-        );
-        assert_eq!(
-            bar.rows(narrowest - 1),
-            2,
-            "one column less and it moved a row"
-        );
+    fn the_eight_icons_are_eight_different_glyphs() {
+        let all = [
+            icon::PUNCTUATION,
+            icon::NUMBERS,
+            icon::TIME,
+            icon::WORDS,
+            icon::QUOTE,
+            icon::ZEN,
+            icon::CUSTOM,
+            icon::OTHER,
+        ];
+        let unique: std::collections::BTreeSet<&str> = all.iter().copied().collect();
+        assert_eq!(unique.len(), all.len(), "two icons are the same character");
+        for glyph in all {
+            assert_eq!(glyph.chars().count(), 1, "{glyph:?} is not one character");
+        }
     }
 
     #[test]
@@ -1310,9 +1460,13 @@ mod tests {
         }
     }
 
-    /// The mode buttons must not move when a mode hides one of the side cards —
-    /// that is what the site's `1fr auto 1fr` grid does, and it is why the bar
-    /// feels like a bar rather than a list that rewraps.
+    /// The mode buttons must not move when a mode changes what the side cells hold.
+    ///
+    /// This is the property the old layout was built around — the site's
+    /// `1fr auto 1fr`, where the two `1fr` columns absorb whatever the side cards do
+    /// not use — and the box keeps it for a different reason: the centre cell is
+    /// sized to its own content first, and only the leftover slack is shared, so
+    /// changing the side cells cannot push the modes anywhere.
     #[test]
     fn the_modes_do_not_move_between_modes() {
         let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
@@ -1325,17 +1479,18 @@ mod tests {
         .map(|mode| {
             let bar = Bar::build(state(mode));
             let lines = bar.render(200, theme).expect("it fits");
-            let line = &lines[0];
-            // Each button is its own span, so the mode card starts at the
-            // first button labelled exactly "time".
+            // Row 2 of the box: the border, the blank, then the settings.
+            let line = &lines[2];
+            // Each button is its own span, so the mode cell starts at the first
+            // button whose label is exactly "time".
             let mut at = 0usize;
             for span in &line.spans {
-                if span.content.as_ref() == "time" {
+                if span.content.as_ref() == "\u{f1142} time" {
                     return at;
                 }
                 at += span.content.chars().count();
             }
-            panic!("the mode card is not in the line");
+            panic!("the mode cell is not in the row");
         });
         assert!(
             offsets.windows(2).all(|w| w[0] == w[1]),
@@ -1347,8 +1502,14 @@ mod tests {
     fn zen_draws_only_the_modes() {
         let bar = Bar::build(state(ConfigMode::Zen));
         let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
-        let lines = bar.render(80, theme).expect("it fits");
-        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let lines = bar
+            .render(bar.narrowest() as u16, theme)
+            .expect("it fits at its own width");
+        let text: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
         assert!(text.contains("zen"), "{text}");
         assert!(!text.contains("punctuation"), "{text}");
         assert!(!text.contains("thicc"), "{text}");
