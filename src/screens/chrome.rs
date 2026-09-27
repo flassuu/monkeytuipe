@@ -60,8 +60,14 @@ impl Chrome {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.accent))
-            .style(Style::default().fg(theme.foreground).bg(theme.surface))
-            .title(format!(" {title} "));
+            .style(Style::default().fg(theme.foreground).bg(theme.surface));
+        // A window with no title gets no title, rather than a gap where one would
+        // be. There is one: the hint over the words.
+        let block = if title.is_empty() {
+            block
+        } else {
+            block.title(format!(" {title} "))
+        };
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
         Some(Self { inner })

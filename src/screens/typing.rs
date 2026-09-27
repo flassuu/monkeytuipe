@@ -120,7 +120,16 @@ impl Screen for Typing {
         let rows = rows_for(frame.area(), bar_rows(app, frame.area().width));
         render_header(app, frame, rows.header, theme);
         topbar::render(app, rows.bar, theme, frame);
-        render_words(app, frame, rows.words, theme);
+        // The site's out-of-focus warning, which in a terminal is the one before a
+        // test has started: the words are there, and something says that a key is
+        // what starts them. The words are drawn dimmed rather than covered, so
+        // they are still readable — a user about to type them should not be stopped
+        // from reading ahead.
+        let awaiting = !app.test().is_started();
+        let below = render_words(app, frame, rows.words, theme);
+        if awaiting {
+            render_awaiting_key(frame, rows.words, below, theme);
+        }
         render_chart(app, frame, rows.chart, theme);
         render_counters(app, frame, rows.counters, theme);
     }
@@ -249,10 +258,20 @@ fn wrap_words(widths: &[usize], width: usize) -> Vec<WordLine> {
 /// The active line sits in the middle of the pane, and the block is centred in
 /// it — the website's arrangement, and the reason a test reads as a thing being
 /// typed rather than as a list being consumed from the top.
-fn render_words(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
+/// Draws the words, and returns the row just below the block it drew.
+///
+/// The hint that says a key starts the test goes on that row, which is the whole
+/// reason this returns anything: a box over the words hides them, and a user about
+/// to type them is allowed to read them.
+///
+/// Before the first keystroke the words need no special treatment. An untouched
+/// word is already drawn in the muted colour, so the block reads as "nothing
+/// matched yet" on its own, and the caret on the active word is still drawn —
+/// which is what a user about to type is looking for.
+fn render_words(app: &App, frame: &mut Frame, area: Rect, theme: Theme) -> u16 {
     let words = app.test().words();
     if words.is_empty() || area.width == 0 || area.height == 0 {
-        return;
+        return area.y;
     }
 
     // Blind mode shows only the word being typed, so the pane is one word wide
@@ -266,7 +285,7 @@ fn render_words(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
         words
     };
     if shown.is_empty() {
-        return;
+        return area.y;
     }
     // Zen shows what was typed, not what was there to type: there is no target
     // and nothing to be wrong about. The wrapping has to measure the same thing
@@ -332,6 +351,10 @@ fn render_words(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
     }
 
     frame.render_widget(Paragraph::new(out).alignment(Alignment::Center), area);
+    // The row below the block, clamped to the pane. `padding` and `drawn` are
+    // counts in rows, so the sum is where the last line of text ended.
+    let used = padding + drawn.min(lines.len() - first_line);
+    (area.y + u16::try_from(used).unwrap_or(u16::MAX)).min(area.y + area.height)
 }
 
 /// Which word of the full list the shown slice starts at.
@@ -432,6 +455,52 @@ fn active_word(word: &Word, theme: Theme, zen: bool) -> Vec<Span<'static>> {
     spans
 }
 
+/// The line under the words that says a key starts the test.
+///
+/// The site has this as `OutOfFocusWarning` — "Click here or press any key to
+/// focus" — but for a different reason: it appears when the *browser window* stops
+/// having focus, because a click is how you get it back. A terminal has no window
+/// to lose focus and no click to bring it back, so the same affordance earns its
+/// keep somewhere else: before the first keystroke, where the words are on screen
+/// and nothing says that typing is how they start.
+///
+/// It goes on the row *below* the words rather than over them. A box drawn over
+/// the words hides them, and a user about to type them is allowed to read them;
+/// the words also get a thin outline in a small terminal, where a three-row box
+/// would be the only thing on screen. When the pane is full and there is no row
+/// left, it is centred on the words and takes their place — which is the one
+/// honest option, and better than a hint pushed off the bottom of the screen.
+///
+/// Shown only before the test starts. Once there is input there is no question to
+/// answer, and an overlay over a test in progress is a thing in the way of the one
+/// thing the screen is for.
+fn render_awaiting_key(frame: &mut Frame, area: Rect, below: u16, theme: Theme) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let line = if below < area.y + area.height {
+        below
+    } else {
+        // No free row. Take a row from the words rather than falling off the screen.
+        area.y + area.height.saturating_sub(1)
+    };
+    let at = Rect::new(area.x, line, area.width, 1);
+    frame.render_widget(
+        Paragraph::new(HINT)
+            .style(Style::default().fg(theme.muted))
+            .alignment(Alignment::Center),
+        at,
+    );
+}
+
+/// What the overlay says.
+///
+/// "press any key" rather than "click here": there is no click. And it says
+/// *any* key because that is true — every printable key starts the test, and so
+/// does a space, which is what a user who has read the words and wants to begin
+/// will press first.
+const HINT: &str = "press any key to start typing";
+
 /// The live chart, centred and capped in width.
 fn render_chart(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
     let chart = app.chart();
@@ -449,10 +518,12 @@ fn render_counters(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
     // Escape is the command list — the same binding the site has when
     // `quickRestart` is off, which is the default — so it is worth saying, or the
     // list is a thing that exists and nothing points at it.
+    // Before the test starts the line under the words already says to type, so
+    // saying it here too would be the same sentence twice on one screen.
     let hint = if app.test().is_started() {
         "tab skip · ctrl+r restart · esc commands · f2 settings"
     } else {
-        "type to start · esc commands · ctrl+c quit"
+        "esc commands · ctrl+c quit"
     };
     let mut spans = Vec::new();
     for (label, value) in [

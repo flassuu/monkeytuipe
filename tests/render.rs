@@ -975,3 +975,122 @@ fn i_opens_the_window_off_the_test_and_types_on_it() {
     );
     assert!(typed.contains('i'), "i did not reach the words: {typed}");
 }
+
+// ---- the "press any key" hint ------------------------------------------
+
+/// Before the first keystroke there is a line saying that a key starts the test.
+///
+/// The site's `OutOfFocusWarning` says "Click here or press any key to focus" for
+/// a different reason — the browser window lost focus. A terminal has no window to
+/// lose focus and no click to bring it back, so the same affordance is worth
+/// having where a terminal actually needs it: the words are on screen and nothing
+/// says that typing is what starts them.
+#[test]
+fn before_the_first_key_there_is_a_hint_saying_one_starts_the_test() {
+    let app = in_mode(monkeytuipe::config::Mode::Time);
+    let text = lines(&render(&app, 80, 24)).join("\n");
+    assert!(text.contains("press any key to start typing"), "{text}");
+}
+
+/// And it is gone once there is input. An overlay over a test in progress is a
+/// thing in the way of the one thing the screen is for.
+#[test]
+fn the_hint_goes_away_once_the_test_starts() {
+    let mut app = in_mode(monkeytuipe::config::Mode::Time);
+    app.set_elapsed(Duration::from_millis(400));
+    for c in "the ".chars() {
+        app.type_char(c);
+    }
+    let text = lines(&render(&app, 80, 24)).join("\n");
+    assert!(!text.contains("press any key"), "{text}");
+}
+
+/// The words stay readable under it. A box drawn over the words hides them, and a
+/// user about to type them is allowed to read them — which is the whole reason
+/// the hint goes on the row *below* the words rather than on top of them.
+#[test]
+fn the_words_are_readable_with_the_hint_up() {
+    let app = in_mode(monkeytuipe::config::Mode::Time);
+    let buffer = render(&app, 80, 24);
+    let words = word_area(&buffer, &app);
+    assert!(words.contains("the"), "{words:?}");
+    assert!(words.contains("because"), "{words:?}");
+    // And the hint is on a row of its own, not mixed into the words.
+    let all = lines(&buffer);
+    let hint_row = all
+        .iter()
+        .position(|line| line.contains("press any key"))
+        .expect("the hint");
+    let words_row = all
+        .iter()
+        .position(|line| line.contains("the child"))
+        .expect("the words");
+    assert_ne!(hint_row, words_row, "the hint is drawn over the words");
+    assert!(
+        !all[hint_row].contains("child"),
+        "the hint is drawn on the words' row: {:?}",
+        all[hint_row]
+    );
+}
+
+/// Nothing is marked right or wrong before the first keystroke, because nothing
+/// has been matched and nothing can be. The words read as text, not as a score.
+#[test]
+fn nothing_is_scored_before_the_first_keystroke() {
+    // A theme where the "correct" and "text" colours differ. On the default one
+    // they are the same colour, so this assertion would be vacuous.
+    let mut app = in_mode(monkeytuipe::config::Mode::Time);
+    app.set_theme(monkeytuipe::config::theme::ThemeName::Gruvbox);
+    let buffer = render(&app, 80, 24);
+    let theme = app.theme();
+    let words = layout_of(&app, &buffer).words;
+    for y in words.y..words.y + words.height {
+        for x in words.x..words.x + words.width {
+            let cell = &buffer[(x, y)];
+            assert_ne!(
+                cell.fg, theme.incorrect,
+                "something is marked wrong: {cell:?}"
+            );
+            assert_ne!(
+                cell.fg, theme.correct,
+                "something is marked right: {cell:?}"
+            );
+        }
+    }
+}
+
+/// And the caret is on the first word even before the test starts — it is where
+/// the next character goes, and a user reading ahead wants to see that.
+#[test]
+fn the_caret_is_there_before_the_test_starts() {
+    let mut app = in_mode(monkeytuipe::config::Mode::Time);
+    app.set_theme(monkeytuipe::config::theme::ThemeName::Gruvbox);
+    let buffer = render(&app, 80, 24);
+    let theme = app.theme();
+    let words = layout_of(&app, &buffer).words;
+    let at_row = |y: u16| {
+        (words.x..words.x + words.width)
+            .filter(|column| buffer[(*column, y)].bg == theme.foreground)
+            .count()
+    };
+    let total: usize = (words.y..words.y + words.height).map(at_row).sum();
+    assert_eq!(
+        total, 1,
+        "there is not exactly one caret cell on the first word"
+    );
+}
+
+/// A terminal with no room for the row below still shows the hint, on a row it
+/// takes from the words. A hint pushed off the bottom of the screen is no hint.
+#[test]
+fn the_hint_survives_a_terminal_with_no_room_for_a_row() {
+    for (width, height) in [(44u16, 8u16), (30, 6), (24, 5)] {
+        let app = in_mode(monkeytuipe::config::Mode::Time);
+        let buffer = render(&app, width, height);
+        let all = lines(&buffer);
+        assert!(
+            all.iter().any(|line| line.contains("press any key")),
+            "no hint on a {width}x{height} terminal: {all:?}"
+        );
+    }
+}

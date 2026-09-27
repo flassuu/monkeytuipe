@@ -1028,6 +1028,16 @@ impl App {
         self.test_mode_inner()
     }
 
+    /// Sets the theme, for a test or a command.
+    ///
+    /// Not a setter on the config, because the settings screen has its own arrow
+    /// keys for it and a second route to the same value is a second thing to keep
+    /// in step.
+    pub fn set_theme(&mut self, theme: crate::config::theme::ThemeName) {
+        self.config.theme = theme;
+        self.dirty = true;
+    }
+
     /// The display width of every word, for laying the word pane out.
     ///
     /// The pane wraps the words itself rather than letting ratatui do it, because
