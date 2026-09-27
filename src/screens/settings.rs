@@ -29,7 +29,6 @@ use ratatui::Frame;
 use crate::action::Action;
 use crate::app::App;
 use crate::config::bar;
-use crate::config::theme::ThemeName;
 use crate::i18n::Key;
 use crate::screens::{Effect, Row, Screen, ScreenKind};
 use crate::words::variants;
@@ -54,6 +53,14 @@ pub enum View {
     Rows,
     /// Choosing a word list: bases down the left, sizes across the top.
     Languages { base: usize, size: usize },
+    /// Choosing a theme, the same shape as the language browser: the whole list at
+    /// once, the current one marked, and no stepping through it one press at a
+    /// time.
+    ///
+    /// Nineteen themes reached by pressing right eighteen times is not a choice, it
+    /// is a count. The language browser solved exactly this for word lists and the
+    /// theme row has the same problem, so it gets the same answer.
+    Themes { selected: usize },
     /// Typing a value into a field.
     Editor { row: Row, text: String },
 }
@@ -63,11 +70,23 @@ pub enum View {
 pub struct Settings {
     selected: usize,
     view: View,
+    /// The theme in use, so the picker can open with the right one highlighted.
+    ///
+    /// Held here rather than read from the app because this screen has no `App`,
+    /// the same reason the editor's text arrives from the app. The app writes it
+    /// on every theme change — both routes, the arrows and the picker — so the two
+    /// ways of changing a theme cannot leave the highlight pointing at the old one.
+    current_theme: crate::config::theme::ThemeName,
 }
 
 impl Settings {
     pub fn selected_row(&self) -> Option<Row> {
         ROWS.get(self.selected).copied()
+    }
+
+    /// Tells the screen which theme is in use, so the picker highlights it.
+    pub fn set_current_theme(&mut self, theme: crate::config::theme::ThemeName) {
+        self.current_theme = theme;
     }
 
     /// Which view is on screen, for the tests and for the app's key handling.
@@ -81,6 +100,18 @@ impl Settings {
     /// make a letter work somewhere else would be the wrong trade.
     pub fn wants_text(&self) -> bool {
         matches!(self.view, View::Editor { .. })
+    }
+
+    /// The themes the picker shows, in the order it shows them: the automatic
+    /// setting first, then every palette in the order the list has always been in.
+    ///
+    /// One function, because the picker and the tests must agree about what "every
+    /// theme" means. `auto` is first rather than sorted in: it is the default, it is
+    /// the one most people want, and it is not a palette.
+    pub fn theme_choices() -> Vec<crate::config::theme::ThemeName> {
+        let mut all: Vec<_> = crate::config::theme::ThemeName::ALL.to_vec();
+        all.sort_by_key(|theme| !theme.is_automatic());
+        all
     }
 
     /// Opens the text editor for a row, seeded with the value the app holds.
@@ -156,6 +187,56 @@ impl Screen for Settings {
             View::Languages { base, size } => {
                 lines.extend(language_items(app, *base, *size));
             }
+            View::Themes { selected } => {
+                // The whole list at once, which is the entire point of a picker.
+                // Nineteen themes in one column needs twenty-two rows, so on a
+                // short terminal it goes to two columns rather than being cut off:
+                // a picker that hides the bottom of its own list is the row-cycling
+                // it replaced, with extra steps.
+                let choices = Self::theme_choices();
+                let columns = Self::theme_columns(choices.len(), chrome.inner.height as usize);
+                let cell_width = (chrome.inner.width as usize / columns.max(1)).max(10);
+                let current = choices.iter().position(|c| *c == self.current_theme);
+
+                // Across, then down: `columns` cells per line. Left to right is
+                // how a menu reads, and the arrows walk the list in the same order,
+                // so what is highlighted and where it is do not disagree.
+                let rows = choices.len().div_ceil(columns.max(1));
+                for row in 0..rows {
+                    let mut spans: Vec<Span<'static>> = Vec::new();
+                    for column in 0..columns {
+                        let index = row * columns + column;
+                        let Some(choice) = choices.get(index) else {
+                            continue;
+                        };
+                        if column > 0 {
+                            spans.push(Span::raw(" "));
+                        }
+                        spans.push(Span::raw(if index == *selected { "▸ " } else { "  " }));
+                        spans.push(Span::styled(
+                            format!(
+                                "{:<width$}",
+                                choice.label(),
+                                width = cell_width.saturating_sub(4)
+                            ),
+                            if index == *selected {
+                                Style::default()
+                                    .fg(theme.accent)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(theme.foreground)
+                            },
+                        ));
+                        // The theme in use is marked even when the highlight is
+                        // elsewhere — the same `●` the language browser uses.
+                        if Some(index) == current && index != *selected {
+                            spans.push(Span::styled("●", Style::default().fg(theme.accent)));
+                        }
+                    }
+                    lines.push(Line::from(spans));
+                }
+                lines.push(super::chrome::hint(app.tr(Key::ThemePickerHint), theme));
+            }
             View::Editor { text, .. } => {
                 lines.push(super::chrome::field(text, theme));
                 lines.push(Line::default());
@@ -169,6 +250,7 @@ impl Screen for Settings {
         match self.view.clone() {
             View::Rows => self.handle_rows(action),
             View::Languages { base, size } => self.handle_languages(action, base, size),
+            View::Themes { selected } => self.handle_themes(action, selected),
             View::Editor { row, text } => self.handle_editor(action, row, text),
         }
     }
@@ -183,6 +265,7 @@ impl Settings {
         match &self.view {
             View::Rows => app.tr(Key::Settings),
             View::Languages { .. } => app.tr(Key::LanguageBrowser),
+            View::Themes { .. } => app.tr(Key::ThemeBrowser),
             // The row's own name, so the window says which setting is open — the
             // one thing a window full of text does not tell you.
             View::Editor { row, .. } => row_value(app, *row).0,
@@ -197,11 +280,14 @@ impl Settings {
     fn height(&self, available: u16) -> u16 {
         let wanted = match &self.view {
             View::Rows => ROWS.len() as u16 + 3,
+            // The language browser fills whatever it is given, because it is a grid
+            // and a grid in a short box is a truncated grid. The theme picker is
+            // only as tall as its list, and goes to two columns rather than
+            // growing past the screen.
             View::Languages { .. } => 0,
+            View::Themes { .. } => Self::theme_choices().len() as u16 + 3,
             View::Editor { .. } => 5,
         };
-        // The language browser fills whatever it is given, because it is a grid
-        // and a grid in a short box is just a truncated grid.
         if wanted == 0 {
             return available;
         }
@@ -236,11 +322,20 @@ impl Settings {
                     1
                 };
                 match row {
-                    // Theme and difficulty are short ordered lists, so a step is the
-                    // right thing to do with left and right — in the direction that
-                    // was pressed, which is the whole point of having two arrows.
-                    Row::Theme | Row::Difficulty | Row::InterfaceLanguage => {
+                    // Difficulty and the interface language are two- and three-item
+                    // lists, so a step is the right thing to do with left and right
+                    // — in the direction that was pressed, which is the whole
+                    // point of having two arrows.
+                    Row::Difficulty | Row::InterfaceLanguage => {
                         vec![Effect::Adjust(row, by)]
+                    }
+                    // The theme opens the picker rather than stepping, exactly as
+                    // the language row opens the language browser. Nineteen themes
+                    // is eighteen presses, and a row you cannot see the ends of is
+                    // not a choice.
+                    Row::Theme => {
+                        self.open_theme_picker();
+                        Vec::new()
                     }
                     // The others are not "one step from the last": they are a list or
                     // a sentence, and stepping through a list of two hundred by
@@ -272,7 +367,6 @@ impl Settings {
     fn open(&mut self, row: Row) -> Vec<Effect> {
         match row {
             Row::Back => vec![Effect::Switch(ScreenKind::Typing)],
-            Row::Theme => vec![Effect::Adjust(row, 1)],
             Row::SubmitResults => vec![Effect::ShowMessage(
                 crate::api::submission::Destination::Monkeytype
                     .describe()
@@ -282,8 +376,79 @@ impl Settings {
                 self.view = View::Languages { base: 0, size: 0 };
                 Vec::new()
             }
+            // Enter on the theme opens the picker, with the current one already
+            // under the highlight. The arrows do the same, as they do for the
+            // language row: one way to reach a list of everything.
+            Row::Theme => {
+                self.open_theme_picker();
+                Vec::new()
+            }
             Row::CustomText | Row::ApeKey => vec![Effect::OpenEditor(row)],
             _ => vec![Effect::Adjust(row, 1)],
+        }
+    }
+
+    /// How many columns the theme list needs to fit in `height` rows.
+    ///
+    /// One column when it fits, two when it does not, and two on a one-row screen
+    /// where nothing fits at all. The point of the picker is that every theme is
+    /// visible; a list whose bottom is cut off is the arrow-cycling it replaced,
+    /// with extra steps.
+    fn theme_columns(count: usize, height: usize) -> usize {
+        // Two borders, the title row and the hint, and the marker column.
+        let usable = height.saturating_sub(2);
+        if count <= usable.max(1) {
+            1
+        } else {
+            count.div_ceil(usable.max(1)).min(2)
+        }
+    }
+
+    /// Opens the theme picker with the current theme under the highlight.
+    fn open_theme_picker(&mut self) {
+        let current = Self::theme_choices()
+            .iter()
+            .position(|theme| *theme == self.current_theme)
+            .unwrap_or(0);
+        self.view = View::Themes { selected: current };
+    }
+
+    /// The theme picker: arrows move, enter chooses, escape leaves.
+    ///
+    /// The same shape as the language browser and for the same reason. Escape
+    /// leaves *without* choosing, so a user who opened the wrong thing is not
+    /// left with a theme they did not pick.
+    fn handle_themes(&mut self, action: Action, selected: usize) -> Vec<Effect> {
+        let all = Self::theme_choices();
+        let last = all.len().saturating_sub(1);
+        match action {
+            Action::Quit => vec![Effect::Quit],
+            // The walk wraps, for the same reason the row list's does: a list that
+            // stops at the ends has two ends to stop at.
+            Action::Up => {
+                self.view = View::Themes {
+                    selected: selected.saturating_sub(1),
+                };
+                Vec::new()
+            }
+            Action::Down => {
+                self.view = View::Themes {
+                    selected: (selected + 1).min(last),
+                };
+                Vec::new()
+            }
+            Action::Back => {
+                self.view = View::Rows;
+                Vec::new()
+            }
+            Action::Select | Action::StartTest | Action::Restart => {
+                let Some(theme) = all.get(selected) else {
+                    return Vec::new();
+                };
+                self.view = View::Rows;
+                vec![Effect::SetTheme(*theme)]
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -411,31 +576,11 @@ fn row_value(app: &App, row: Row) -> (&'static str, String) {
     match row {
         Row::Theme => (
             app.tr(Key::Theme),
-            match app.config.theme {
-                // `auto` is a decision, not a theme, so it says what it decided
-                // rather than what it is.
-                ThemeName::Auto => {
-                    format!(
-                        "{} ({})",
-                        app.tr(Key::ThemeAuto),
-                        ThemeName::auto_for(app.terminal()).label()
-                    )
-                }
-                // And so is `terminal`, and it is a decision that can come out
-                // empty. A terminal that did not answer the colour query makes
-                // `terminal` resolve to exactly what `auto` would, so without
-                // saying so the row looks like the left arrow did nothing — which
-                // is the one row where that is most likely to be noticed, because
-                // it is the first.
-                ThemeName::Terminal if crate::terminal::palette::reported().is_empty() => {
-                    format!(
-                        "{} ({})",
-                        app.tr(Key::ThemeTerminal),
-                        app.tr(Key::ThemeNoReply)
-                    )
-                }
-                other => other.label().to_owned(),
-            },
+            // The name and nothing else. This row used to say `auto (monkeytype)`
+            // or `terminal (no reply)`, annotating a decision the user did not
+            // make and could not change. There is one automatic setting now and it
+            // is called `auto`, so `auto` is the whole of what there is to say.
+            app.config.theme.label().to_owned(),
         ),
         Row::Difficulty => (
             app.tr(Key::Difficulty),
@@ -633,6 +778,21 @@ mod tests {
     }
 
     /// A row's current value, read out of the app, for a test about direction.
+    /// Draws the app and flattens it, for a test about what is on screen.
+    fn draw_app(app: &App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a terminal");
+        terminal.draw(|frame| app.render(frame)).expect("draws");
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Walks the *app's* selection to `row`, through the real key path.
     fn walk_app(app: &mut App, row: Row) {
         for _ in 0..ROWS.len() {
@@ -652,6 +812,7 @@ mod tests {
         match row {
             Row::Theme => app.config.theme.label().to_owned(),
             Row::Difficulty => app.tr(app.config.test.difficulty.key()).to_owned(),
+            Row::InterfaceLanguage => app.config.ui_language.self_name().to_owned(),
             other => panic!("{other:?} is not a value a direction applies to"),
         }
     }
@@ -705,6 +866,26 @@ mod tests {
         press(app, settings, actions)
     }
 
+    /// Drives a screen without an app, for the tests that only need the effects.
+    fn keys_on(settings: &mut Settings, actions: &[Action]) -> Vec<Effect> {
+        let mut app = app();
+        press(&mut app, settings, actions)
+    }
+
+    /// Walks the selection to `row`, on the screen rather than through the app.
+    fn walk_on(settings: &mut Settings, row: Row) {
+        for _ in 0..ROWS.len() {
+            if settings.selected_row() == Some(row) {
+                return;
+            }
+            settings.handle(Action::Down);
+        }
+        panic!(
+            "could not walk to {row:?}; stopped on {:?}",
+            settings.selected_row()
+        );
+    }
+
     /// The settings the bar owns must not also be here, or one of the two goes
     /// stale and the screen shows a value it does not apply.
     #[test]
@@ -751,23 +932,172 @@ mod tests {
         assert_eq!(effects, vec![Effect::Switch(ScreenKind::Typing)]);
     }
 
+    /// Enter on the theme opens the picker, exactly as enter on the language row
+    /// opens the language browser.
+    ///
+    /// It used to *step* the theme. Nineteen themes is eighteen presses, and a row
+    /// you cannot see the ends of is not a choice.
     #[test]
-    fn enter_on_the_theme_cycles_it() {
-        let effects = keys_for(&[Action::Select]);
-        assert_eq!(effects, vec![Effect::Adjust(Row::Theme, 1)]);
+    fn enter_on_the_theme_opens_a_picker() {
+        let mut settings = Settings::default();
+        keys_on(&mut settings, &[Action::Select]);
+        assert!(
+            matches!(settings.view(), View::Themes { .. }),
+            "enter did not open the picker: {:?}",
+            settings.view()
+        );
+    }
+
+    /// And the arrows do the same, because there should be one way to reach a list
+    /// of everything rather than two that behave differently.
+    #[test]
+    fn both_arrows_on_the_theme_open_the_picker() {
+        for (action, code) in [
+            (Action::Left, KeyCode::Left),
+            (Action::Right, KeyCode::Right),
+        ] {
+            let mut screen = app();
+            screen.show_screen(crate::screens::ScreenKind::Settings);
+            walk_app(&mut screen, Row::Theme);
+            screen.press(code);
+            assert!(
+                matches!(screen.view_kind(), Some(View::Themes { .. })),
+                "{action:?} did not open the picker: {:?}",
+                screen.view_kind()
+            );
+        }
+    }
+
+    /// The picker shows every theme, with the current one under the highlight and
+    /// marked. A list you cannot see is not a picker.
+    ///
+    /// Driven through the app's own key path, because the screen does not know
+    /// which theme is in use — the app tells it when the screen is built. A test
+    /// that bypassed that would be testing a screen that can never be on screen.
+    #[test]
+    fn the_picker_lists_every_theme() {
+        let mut app = app();
+        app.show_screen(crate::screens::ScreenKind::Settings);
+        walk_app(&mut app, Row::Theme);
+        app.press(KeyCode::Enter);
+        let View::Themes { selected } = *app.view_kind().expect("a view") else {
+            panic!("not a picker: {:?}", app.view_kind());
+        };
+        let choices = Settings::theme_choices();
+        assert_eq!(choices.len(), crate::config::theme::ThemeName::ALL.len());
+        // The highlight starts on the theme in use.
+        assert_eq!(
+            choices[selected],
+            app.theme_name(),
+            "the highlight is on the wrong theme"
+        );
+        // And every one of them is drawn.
+        let text = draw_app(&app, 92, 40);
+        for choice in &choices {
+            assert!(
+                text.contains(choice.label()),
+                "{} is missing: {text}",
+                choice.label()
+            );
+        }
+    }
+
+    /// Enter sets the highlighted theme; escape leaves without setting anything.
+    /// A user who opened the wrong thing must not be left with a theme they did
+    /// not pick.
+    #[test]
+    fn the_picker_chooses_on_enter_and_leaves_on_escape() {
+        let mut app = app();
+        app.show_screen(crate::screens::ScreenKind::Settings);
+        walk_app(&mut app, Row::Theme);
+        app.press(KeyCode::Enter);
+        app.press(KeyCode::Down);
+        let wanted = Settings::theme_choices()[1];
+        app.press(KeyCode::Enter);
+        assert_eq!(
+            app.theme_name(),
+            wanted,
+            "enter did not set the highlighted theme"
+        );
+        assert_eq!(app.view_kind(), Some(&View::Rows), "the picker stayed open");
+
+        let mut dismissed = self::app();
+        dismissed.show_screen(crate::screens::ScreenKind::Settings);
+        walk_app(&mut dismissed, Row::Theme);
+        dismissed.press(KeyCode::Enter);
+        dismissed.press(KeyCode::Down);
+        dismissed.press(KeyCode::Esc);
+        assert_eq!(
+            dismissed.theme_name(),
+            crate::config::theme::ThemeName::Auto,
+            "escape set a theme"
+        );
+        assert_eq!(
+            dismissed.view_kind(),
+            Some(&View::Rows),
+            "escape did not close the picker"
+        );
+    }
+
+    /// The highlight walks the whole list without sticking at either end, so a list
+    /// of nineteen can be crossed without counting.
+    #[test]
+    fn the_picker_walks_the_whole_list_without_sticking() {
+        let mut walker = app();
+        walker.show_screen(crate::screens::ScreenKind::Settings);
+        walk_app(&mut walker, Row::Theme);
+        walker.press(KeyCode::Enter);
+        let total = Settings::theme_choices().len();
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..total {
+            if let Some(View::Themes { selected }) = walker.view_kind() {
+                seen.insert(*selected);
+            }
+            walker.press(KeyCode::Down);
+        }
+        assert_eq!(seen.len(), total, "the walk missed {total} entries");
+    }
+
+    /// And the highlight is right the second time the picker is opened, after a
+    /// theme was chosen by a different route. Two writers to one field is how a
+    /// picker ends up pointing at the theme that was replaced.
+    #[test]
+    fn the_highlight_follows_the_theme_that_was_chosen() {
+        let mut app = app();
+        app.show_screen(crate::screens::ScreenKind::Settings);
+        walk_app(&mut app, Row::Theme);
+        app.press(KeyCode::Enter);
+        for _ in 0..4 {
+            app.press(KeyCode::Down);
+        }
+        app.press(KeyCode::Enter);
+        let chosen = app.theme_name();
+        // Open it again.
+        app.press(KeyCode::Enter);
+        let View::Themes { selected } = *app.view_kind().expect("a view") else {
+            panic!("not a picker: {:?}", app.view_kind());
+        };
+        assert_eq!(
+            Settings::theme_choices()[selected],
+            chosen,
+            "the picker did not open on the theme in use"
+        );
     }
 
     /// The bug this fixes: `left` and `right` were the same key. Both arrows went
-    /// the same way, so a theme could be cycled forwards but not back, and a
-    /// difficulty could not be walked in the direction the arrow pointed.
-    /// On the top row, which is where `keys_for` starts. The two arrows produce
-    /// two different effects, with opposite signs.
+    /// the same way, so a difficulty could not be walked in the direction the arrow
+    /// pointed. On the top row the two arrows now open the picker; the difficulty
+    /// row is where the sign is checked.
     #[test]
     fn the_two_arrows_step_in_opposite_directions() {
-        let left = keys_for(&[Action::Left]);
-        let right = keys_for(&[Action::Right]);
-        assert_eq!(left, vec![Effect::Adjust(Row::Theme, -1)]);
-        assert_eq!(right, vec![Effect::Adjust(Row::Theme, 1)]);
+        let mut left_screen = Settings::default();
+        walk_on(&mut left_screen, Row::Difficulty);
+        let left = keys_on(&mut left_screen, &[Action::Left]);
+        let mut right_screen = Settings::default();
+        walk_on(&mut right_screen, Row::Difficulty);
+        let right = keys_on(&mut right_screen, &[Action::Right]);
+        assert_eq!(left, vec![Effect::Adjust(Row::Difficulty, -1)]);
+        assert_eq!(right, vec![Effect::Adjust(Row::Difficulty, 1)]);
         assert_ne!(left, right, "the two arrows did the same thing");
     }
 
@@ -780,7 +1110,10 @@ mod tests {
     /// see a sign dropped on the floor.
     #[test]
     fn the_arrows_reach_the_value_in_their_own_directions() {
-        for row in [Row::Theme, Row::Difficulty] {
+        // The theme row is not in this list: its arrows open the picker, which is
+        // what the language row does and what "you cannot see the ends of a list of
+        // nineteen" makes necessary. The sign is checked on the rows that step.
+        for row in [Row::Difficulty, Row::InterfaceLanguage] {
             let mut app = app();
             app.show_screen(crate::screens::ScreenKind::Settings);
             walk_app(&mut app, row);
@@ -1047,9 +1380,18 @@ mod tests {
     }
 
     #[test]
-    fn the_theme_row_says_what_auto_decided() {
+    fn the_theme_row_says_only_the_theme_name() {
+        // It used to read `auto (monkeytype)`, annotating a decision the user did
+        // not make and cannot change from this row. There is one automatic theme
+        // now, called `auto`, and that is the whole of what there is to say.
         let text = draw(&Settings::default(), &app(), 70, 14);
-        assert!(text.contains("auto ("), "{text}");
+        assert!(text.contains("auto"), "{text}");
+        for annotation in ["auto (", "(monkeytype)", "no reply", "(terminal"] {
+            assert!(
+                !text.contains(annotation),
+                "the row still says {annotation:?}: {text}"
+            );
+        }
     }
 
     #[test]

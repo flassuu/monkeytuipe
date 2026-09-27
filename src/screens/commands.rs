@@ -191,10 +191,15 @@ pub const COMMANDS: &[Command] = &[
         aliases: &["theme", "colour", "color"],
         action: Action::NextTheme,
     },
+    // `terminal colours` used to be its own command, because `terminal` was its own
+    // theme. There is one automatic theme now and it is called `auto`, so the
+    // command would be a second way of choosing something the settings row already
+    // offers by name. It is gone rather than aliased: two commands for one setting
+    // is two things to keep in step.
     Command {
-        display: "terminal colours",
-        aliases: &["theme", "terminal", "native"],
-        action: Action::Theme("terminal"),
+        display: "auto colours",
+        aliases: &["auto", "terminal", "native"],
+        action: Action::Theme("auto"),
     },
     Command {
         display: "gruvbox",
@@ -385,6 +390,14 @@ fn strip_punctuation(word: &str) -> String {
     word.chars()
         .filter(|c| c.is_alphanumeric() || *c == ' ')
         .collect()
+}
+
+/// Every command's display, in list order.
+///
+/// For anything that shows the whole list rather than a filtered one — currently
+/// only the tests, which want to know what is *there* rather than what matches.
+pub fn plain_list() -> Vec<&'static str> {
+    COMMANDS.iter().map(|command| command.display).collect()
 }
 
 /// A command's display, for the list.

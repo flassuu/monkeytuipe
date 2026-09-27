@@ -7,22 +7,26 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeName {
-    /// Whatever the terminal says it can do.
+    /// Whatever the terminal says about itself, in preference to a guess.
+    ///
+    /// One setting, not two, and that is a change of mind. There used to be `auto`
+    /// — pick a bundled theme by colour depth and background — *and* `terminal`,
+    /// which asks the terminal for its own colours. They are the same intent
+    /// ("use this machine's colours") reached two ways, and the picker showed both
+    /// with an annotation on each: `auto (monkeytype)` and `terminal (no reply)`.
+    /// Two rows saying one thing, in a list whose whole purpose is to be scanned.
+    ///
+    /// So `auto` asks first and guesses second. A terminal that answers — `OSC
+    /// 10`, `OSC 11` and the sixteen ANSI entries — gives its exact colours; one
+    /// that does not falls back to the bundled guess. Either way the row says
+    /// `auto`, because that is the only thing the user chose and the only thing
+    /// they can change.
     ///
     /// The default, because it is the only setting that is right on a machine
-    /// nobody has looked at: the colour depth and the background are both things
-    /// the terminal usually knows and this client did not.
+    /// nobody has looked at.
     #[default]
+    #[serde(alias = "terminal")]
     Auto,
-    /// The terminal's own colours, asked for rather than guessed.
-    ///
-    /// The one theme that is not a set of numbers somebody chose: it is what the
-    /// terminal says its foreground, background and sixteen ANSI colours are, so
-    /// the app looks like the window it is in rather than like anyone else's
-    /// idea of a good colour scheme. A terminal that will not answer falls back to
-    /// `auto`, which is why this and `auto` are the same kind of setting — both
-    /// are decisions about the machine rather than a palette.
-    Terminal,
     Monkeytype,
     Gruvbox,
     Nord,
@@ -44,9 +48,8 @@ pub enum ThemeName {
 }
 
 impl ThemeName {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 19] = [
         Self::Auto,
-        Self::Terminal,
         Self::Monkeytype,
         Self::Gruvbox,
         Self::Nord,
@@ -71,7 +74,6 @@ impl ThemeName {
     pub fn label(self) -> &'static str {
         match self {
             Self::Auto => "auto",
-            Self::Terminal => "terminal",
             Self::Monkeytype => "monkeytype",
             Self::Gruvbox => "gruvbox",
             Self::Nord => "nord",
@@ -101,19 +103,13 @@ impl ThemeName {
     /// tell which of eighteen dark themes somebody would have chosen.
     pub fn for_terminal(self, terminal: &super::terminal::Terminal) -> Theme {
         match self {
-            // Not a palette: a question, answered once at start-up.
-            Self::Terminal => {
+            // Not a palette: a question, answered once at start-up. The terminal is
+            // asked what its colours are; if it says nothing, the guess below is
+            // the fallback rather than the primary.
+            Self::Auto => {
                 let reported = crate::terminal::palette::reported();
-                // The fallback is `auto`, so a terminal that will not say what
-                // colours it uses gets exactly what a terminal with no
-                // `COLORFGBG` would get rather than a theme of nothing.
                 let mut theme =
                     crate::terminal::palette::build(&reported, &Self::auto_for(terminal).resolve());
-                terminal.adapt(&mut theme);
-                theme
-            }
-            Self::Auto => {
-                let mut theme = Self::auto_for(terminal).resolve();
                 terminal.adapt(&mut theme);
                 theme
             }
@@ -121,10 +117,12 @@ impl ThemeName {
         }
     }
 
-    /// The theme `auto` settles on, as a name.
+    /// The bundled theme `auto` falls back to when the terminal did not answer.
     ///
-    /// Exposed so the settings row can say *what* it decided rather than just
-    /// `auto`, which is a decision and not an answer.
+    /// The background is the only thing that can go badly wrong — a dark theme on
+    /// a light terminal is unreadable — so that is what the choice is based on.
+    /// Everything else is left to the user's taste, because there is no way to
+    /// tell which of eighteen dark themes somebody would have chosen.
     pub fn auto_for(terminal: &super::terminal::Terminal) -> Self {
         if terminal.is_light() {
             Self::SolarizedLight
@@ -135,17 +133,19 @@ impl ThemeName {
 
     /// Whether the theme is meant for a light terminal.
     ///
-    /// The automatic setting picks one of these when the terminal says it has a
-    /// light background, so a light terminal never ends up with a dark theme —
-    /// which is not a matter of taste but of being able to read the words.
+    /// The automatic setting resolves against whatever the terminal reported, so
+    /// a light terminal never ends up with a dark theme — which is not a matter of
+    /// taste but of being able to read the words.
     pub fn is_light(self) -> bool {
         match self {
             Self::SolarizedLight | Self::GruvboxLight | Self::OneHalfLight => true,
-            // Decided by what the terminal said, not by the name. A theme called
-            // "terminal" on a light terminal is a light theme.
-            Self::Terminal => crate::terminal::palette::reported()
-                .background
-                .is_some_and(crate::terminal::palette::is_light),
+            // Decided by what the terminal said, then by what the fallback would
+            // be. A theme called `auto` on a light terminal is a light theme, and
+            // `COLORFGBG` says so even when OSC did not answer.
+            Self::Auto => match crate::terminal::palette::reported().background {
+                Some(background) => crate::terminal::palette::is_light(background),
+                None => false,
+            },
             _ => false,
         }
     }
@@ -153,33 +153,32 @@ impl ThemeName {
     /// Whether a theme name is a real theme rather than the automatic setting.
     ///
     /// Used by the settings screen to label the current value: showing `auto` in
-    /// the theme row is honest, but listing it among the choices is not.
+    /// the theme row is honest, but listing it among the palettes is not.
     pub fn name_is_explicit(self) -> bool {
         self != Self::Auto
     }
 
     /// Whether this theme is a question about the machine rather than a palette.
     ///
-    /// `auto` and `terminal` both are, and the settings screen lists them apart
-    /// from the colours for exactly that reason: one asks about the colour depth
-    /// and the background, the other asks for the colours themselves, and both
-    /// resolve to something else rather than to a palette of their own.
+    /// Only `auto` is, and the settings screen's picker shows it apart from the
+    /// colours for exactly that reason: it resolves to something else rather than
+    /// to a palette of its own.
     pub fn is_automatic(self) -> bool {
-        matches!(self, Self::Auto | Self::Terminal)
+        self == Self::Auto
     }
 
     /// Every theme a user can pick, `auto` aside.
     ///
-    /// The settings screen lists these rather than [`Self::ALL`], because `auto`
-    /// is what is already configured rather than something to cycle to.
+    /// The settings screen's picker lists these rather than [`Self::ALL`], because
+    /// `auto` is not a theme to try on — it is the absence of a choice.
     pub fn choices() -> impl Iterator<Item = Self> {
-        Self::ALL.into_iter().filter(|name| *name != Self::Auto)
+        Self::ALL.into_iter().filter(|name| !name.is_automatic())
     }
 
-    /// The two themes that are questions about the machine, for the settings
-    /// screen to show above the palettes.
+    /// The themes that are questions about the machine, for the picker to show
+    /// above the palettes.
     pub fn automatic() -> impl Iterator<Item = Self> {
-        [Self::Auto, Self::Terminal].into_iter()
+        Self::ALL.into_iter().filter(|name| name.is_automatic())
     }
 
     /// Steps through the themes in a direction.
@@ -208,11 +207,10 @@ impl ThemeName {
             // `auto` is resolved before it gets here, by `for_terminal`. This
             // arm exists only so the match is total, and it picks the same thing
             // `auto` picks for an unknown dark terminal.
-            // `Terminal` never reaches here in normal use: `for_terminal` builds
-            // it from the query. The arm exists so the match is total, and it
-            // returns the same dark default `auto` returns, which is what
-            // `build` falls back to.
-            Self::Auto | Self::Terminal | Self::Monkeytype => Theme {
+            // `auto` never reaches here in normal use: `for_terminal` builds it
+            // from the query. The arm exists so the match is total, and it returns
+            // the same dark default `auto` falls back to.
+            Self::Auto | Self::Monkeytype => Theme {
                 background: Color::Rgb(20, 20, 20),
                 surface: Color::Rgb(32, 32, 32),
                 foreground: Color::Rgb(212, 212, 212),

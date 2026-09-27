@@ -44,12 +44,20 @@
 use serde::{Deserialize, Serialize};
 
 /// An interface language.
+///
+/// Serialised as its code — `en`, `ru` — because that is what
+/// [`Lang::code`] documents and what a config file wants. The first version
+/// derived the spelling from the variant names and wrote `english`, which
+/// disagreed with its own documentation and with every other language-tagged
+/// thing on the machine. The full names are accepted on read for the same reason
+/// `theme = "terminal"` is: a config that once parsed must keep parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum Lang {
     /// The default, and the only language the website has.
     #[default]
+    #[serde(rename = "en", alias = "english")]
     English,
+    #[serde(rename = "ru", alias = "russian")]
     Russian,
 }
 
@@ -222,9 +230,11 @@ strings! {
     InterfaceLanguage    => ["interface language", "язык интерфейса"],
     SubmitResults        => ["submit results", "отправлять результаты"],
     BackToTyping         => ["back to typing",  "назад к набору"],
-    ThemeAuto            => ["auto",       "авто"],
-    ThemeTerminal        => ["terminal",   "терминал"],
-    ThemeNoReply         => ["no reply",   "нет ответа"],
+    ThemeBrowser         => ["choose a theme", "выберите тему"],
+    ThemePickerHint      => [
+        "↑↓ move · enter choose · esc close",
+        "↑↓ выбор · enter применить · esc закрыть",
+    ],
     NoApeKeySet          => [
         "no ApeKey set — reads need one",
         "ключ ape не задан — для чтения нужен",

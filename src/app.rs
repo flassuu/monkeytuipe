@@ -1058,6 +1058,23 @@ impl App {
         .to_owned()
     }
 
+    /// Tells the settings screen which theme is in use.
+    ///
+    /// Called on *every* theme change, from both the arrows and the picker. One
+    /// write for both routes is the point: two writers is how the picker's
+    /// highlight ends up pointing at the theme that was replaced.
+    fn sync_theme_to_screen(&mut self) {
+        let theme = self.config.theme;
+        if let ScreenState::Settings(screen) = &mut self.screen {
+            screen.set_current_theme(theme);
+        }
+    }
+
+    /// The configured theme's name, for a test or a status line.
+    pub fn theme_name(&self) -> crate::config::theme::ThemeName {
+        self.config.theme
+    }
+
     /// The configured difficulty, for a test or a status line.
     pub fn difficulty(&self) -> crate::config::Difficulty {
         self.config.test.difficulty
@@ -1519,7 +1536,11 @@ impl App {
             Effect::Switch(kind) => {
                 self.screen = match kind {
                     ScreenKind::Typing => ScreenState::Typing(Default::default()),
-                    ScreenKind::Settings => ScreenState::Settings(Default::default()),
+                    ScreenKind::Settings => {
+                        let mut screen = crate::screens::settings::Settings::default();
+                        screen.set_current_theme(self.config.theme);
+                        ScreenState::Settings(screen)
+                    }
                     ScreenKind::Results => ScreenState::Results(Default::default()),
                 };
                 false
@@ -1553,11 +1574,22 @@ impl App {
             }
             Effect::Adjust(row, by) => {
                 self.adjust_by(row, by);
+                if row == Row::Theme {
+                    self.sync_theme_to_screen();
+                }
                 false
             }
             Effect::SetLanguage(id) => {
                 self.config.test.language = id.clone();
                 self.start_language(id);
+                false
+            }
+            // Setting the theme from the picker, rather than stepping to it with
+            // the arrows. The two are different actions and get different effects,
+            // because the picker's job is to *set* the one that was highlighted.
+            Effect::SetTheme(theme) => {
+                self.set_theme(theme);
+                self.sync_theme_to_screen();
                 false
             }
             Effect::SetApeKey(key) => {
@@ -2182,15 +2214,21 @@ mod tests {
         let mut app = app();
         assert!(!app.is_dirty());
         app.on_key(press(KeyCode::F(2))).expect("no io");
-        // Row 0 is the theme; right cycles it.
+        // Row 0 is the theme; right opens the picker, and choosing from it is what
+        // makes the config dirty. The arrows do not step any more — nineteen themes
+        // is eighteen presses, and a row you cannot see the ends of is not a choice.
         app.on_key(press(KeyCode::Right)).expect("no io");
+        assert!(
+            !app.is_dirty(),
+            "opening the picker should not change anything"
+        );
+        app.on_key(press(KeyCode::Down)).expect("no io");
+        app.on_key(press(KeyCode::Enter)).expect("no io");
         assert!(app.is_dirty());
         assert_eq!(
             app.config.theme,
-            // `auto` is the default and the first step is the next thing after it,
-            // which is the terminal's own colours.
-            crate::config::theme::ThemeName::Terminal,
-            "the first step off the default is the next theme in the list"
+            crate::config::theme::ThemeName::Monkeytype,
+            "the second entry in the picker is not what was chosen"
         );
     }
 
@@ -3737,25 +3775,78 @@ mod tests {
         assert!(keys.1.iter().any(|key| key == "esc"), "{keys:?}");
     }
 
-    /// A theme row that looks the same before and after the arrow is a row that
-    /// looks broken. `auto` and `terminal` resolve identically when the terminal
-    /// did not answer the colour query, so the row has to say so.
+    /// A theme row that annotates a decision the user did not make is a row with
+    /// two facts on it, one of which cannot be changed from here.
+    ///
+    /// It used to read `auto (monkeytype)` or `terminal (no reply)`. Both are gone:
+    /// there is one automatic theme now, it is called `auto`, and that is the whole
+    /// of what there is to say about it.
     #[test]
-    fn the_terminal_theme_says_when_the_terminal_did_not_answer() {
+    fn the_theme_row_says_the_name_and_nothing_else() {
         let mut app = app();
         app.on_key(press(KeyCode::F(2))).expect("no io");
-        // The palette is never queried in a test, so `terminal` has nothing to
-        // work from — which is exactly the case worth being honest about.
-        app.on_key(press(KeyCode::Right)).expect("no io");
-        assert_eq!(app.config.theme, crate::config::theme::ThemeName::Terminal);
         let value = crate::screens::settings::row_values(&app)
             .into_iter()
-            .find(|(name, _)| *name == "theme")
+            .find(|(name, _)| name.contains("theme"))
             .map(|(_, value)| value)
             .expect("a theme row");
-        assert!(
-            value.contains("no reply"),
-            "the row does not say the terminal did not answer: {value:?}"
+        assert_eq!(value, "auto", "{value:?}");
+        for annotation in ["(", "reply", "monkeytype", "terminal"] {
+            assert!(
+                !value.contains(annotation),
+                "the theme row still says {annotation:?}: {value:?}"
+            );
+        }
+    }
+
+    /// Every theme's row value is its own name and nothing else, so the list reads
+    /// as a list of names rather than a list of sentences.
+    #[test]
+    fn every_theme_reads_as_its_own_name() {
+        for theme in crate::config::theme::ThemeName::ALL {
+            let mut app = app();
+            app.set_theme(theme);
+            let value = crate::screens::settings::row_values(&app)
+                .into_iter()
+                .find(|(name, _)| name.contains("theme"))
+                .map(|(_, value)| value)
+                .expect("a theme row");
+            assert_eq!(value, theme.label(), "{theme:?} reads as {value:?}");
+        }
+    }
+
+    /// A config file that named `terminal` keeps working. It was a real setting for
+    /// a release, and a config that no longer parses is a config a user has to
+    /// edit by hand.
+    #[test]
+    fn a_config_that_named_terminal_still_reads() {
+        let parsed: Config = toml::from_str(
+            r#"
+            version = 1
+            ape_key = ""
+            api_url = "https://api.monkeytype.com"
+            theme = "terminal"
+            submit_results = false
+            ui_language = "en"
+
+            [test]
+            mode = "time"
+            punctuation = false
+            numbers = false
+            difficulty = "normal"
+            language = "english"
+            time = 30
+            words = 25
+            quote_length = "all"
+            blind = false
+            custom_text = []
+            "#,
+        )
+        .expect("a config that named terminal");
+        assert_eq!(
+            parsed.theme,
+            crate::config::theme::ThemeName::Auto,
+            "the old name did not read as the automatic theme"
         );
     }
 

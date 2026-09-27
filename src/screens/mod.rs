@@ -51,6 +51,13 @@ pub enum Effect {
     ChangeBar(i8),
     /// Switch to a word list, fetching it if it is not in the binary.
     SetLanguage(String),
+    /// Use a theme, from the picker rather than from a row of arrows.
+    ///
+    /// A separate effect from `Adjust(Row::Theme, _)` because the two do
+    /// different things: the arrows *step* to the next theme, and the picker *sets*
+    /// the one that was clicked. A setting reached two ways with one effect would
+    /// mean the effect has to know which way it arrived.
+    SetTheme(crate::config::theme::ThemeName),
     /// Store an ApeKey the user typed.
     SetApeKey(String),
     /// Store a custom passage the user typed.

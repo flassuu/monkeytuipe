@@ -1167,7 +1167,6 @@ fn the_settings_screen_is_fully_russian() {
         "не задано",
         "назад к набору",
         "невозможно",
-        "авто",
     ] {
         assert!(text.contains(said), "{said:?} is missing: {text}");
     }
@@ -1177,10 +1176,37 @@ fn the_settings_screen_is_fully_russian() {
         "custom text",
         "not set",
         "back to typing",
-        "auto (",
     ] {
         assert!(!text.contains(said), "{said:?} is still English: {text}");
     }
+    // The theme's *name* is a name, and says the same thing in both languages —
+    // `auto` is `auto` in a Russian interface, the same way `gruvbox` is.
+    assert!(
+        text.contains("auto"),
+        "the theme name was translated: {text}"
+    );
+}
+
+/// The theme picker, which is the whole list at once — the same shape as the
+/// language browser, and for the same reason: nineteen themes reached by pressing
+/// right eighteen times is a count, not a choice.
+#[test]
+fn the_theme_picker_shows_every_theme_at_once() {
+    use monkeytuipe::config::theme::ThemeName;
+    let mut app = in_language(monkeytuipe::i18n::Lang::English);
+    app.press(KeyCode::F(2));
+    app.press(KeyCode::Enter);
+    let text = lines(&render(&app, 100, 44)).join("\n");
+    for theme in ThemeName::ALL {
+        assert!(
+            text.contains(theme.label()),
+            "{} is missing from the picker",
+            theme.label()
+        );
+    }
+    // And it is a window, like the language browser and like the command list.
+    assert!(text.contains('╭'), "the picker is not a window: {text}");
+    assert!(text.contains("choose a theme"), "no title: {text}");
 }
 
 /// The bar is the widest thing on the screen, so it is the first thing a
