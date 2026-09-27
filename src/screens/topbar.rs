@@ -182,21 +182,34 @@ pub struct Button {
 }
 
 impl Button {
-    /// The button's drawn width: the glyph, a space, and the label.
+    /// The button's drawn width, in columns: the glyph, a space, and the label.
     ///
-    /// The glyph is counted by characters, not bytes, because a Nerd Font glyph is
-    /// three bytes of UTF-8 and one cell — counting bytes is how a bar with icons
-    /// ends up a third wider than the space it was given.
+    /// Measured with `unicode-width`, which is what ratatui lays out with and what the
+    /// terminal is being asked for. Counting *characters* is the obvious thing and it
+    /// is wrong: a Nerd Font glyph is three bytes and one column, and an emoji is one
+    /// character and two columns, and the glyph is now whatever the user typed in
+    /// `config.toml`, so it can be either. Every width on this bar is a column count
+    /// for that reason.
     ///
     /// `icons` is false when the terminal is too narrow to afford them, and then the
     /// glyph costs nothing at all rather than being drawn and clipped.
     fn width(&self, icons: bool) -> usize {
-        let label = self.label.chars().count();
+        let label = columns(&self.label);
         if !icons || self.icon.is_empty() {
             return label;
         }
-        label + self.icon.chars().count() + 1
+        label + columns(&self.icon) + 1
     }
+}
+
+/// How wide a piece of text is, in terminal columns.
+///
+/// Every width in this file is a column count and not a character count, and this is
+/// the one function that says so. A character count and a column count are the same
+/// number for ASCII and different for almost everything else, and the difference is
+/// the difference between a frame that lines up and a ragged one.
+fn columns(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
 }
 
 /// A whole card: a title and its buttons.
@@ -601,7 +614,7 @@ impl Bar {
             let mut spans: Vec<Span<'static>> = vec![Span::styled(BORDER, frame_style(theme))];
             for (index, cell_width) in cells.iter().enumerate() {
                 let cell = &content[index];
-                let used: usize = cell.iter().map(|s| s.content.chars().count()).sum();
+                let used: usize = cell.iter().map(|s| columns(s.content.as_ref())).sum();
                 let slack = cell_width.saturating_sub(used);
                 spans.push(Span::raw(" ".repeat(slack / 2)));
                 spans.extend(cell.iter().cloned());
@@ -1556,7 +1569,7 @@ mod tests {
             );
         }
         for button in bar.buttons() {
-            let cells = button.icon.chars().count();
+            let cells = columns(&button.icon);
             assert!(cells <= 1, "{}: a glyph is {cells} cells", button.label);
             match button.field {
                 Field::Time | Field::Words | Field::QuoteLength | Field::CustomText => {
@@ -1648,6 +1661,69 @@ mod tests {
         }
     }
 
+    /// No glyph a user can put in `config.toml` can break the frame.
+    ///
+    /// The bar's arithmetic is done before the glyph is looked at, and the glyph is
+    /// now a string somebody typed, so the measure has to be right for values nobody
+    /// could have predicted. An emoji is the case that matters: it is *one character*
+    /// and *two columns*, so a character count reserves one and the terminal draws
+    /// two, and the frame goes ragged by exactly as much as the user was careless.
+    /// `unicode-width` is what ratatui lays out with and what the terminal is asked
+    /// for, so the bar asks it too.
+    ///
+    /// Measured by drawing: the row has to come out `width` cells with its last
+    /// border on the last column, for every value, at every width that draws at all.
+    #[test]
+    fn no_glyph_a_user_can_configure_can_break_the_frame() {
+        let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
+        let values = [
+            "",
+            "R",
+            "󰀁",
+            "\u{1f600}", // one character, two columns
+            "\u{4e00}",  // one character, two columns
+            "fa-wrench", // a name, resolves
+            "fa-wrenc",  // a name, does not
+            "not-a-name",
+            "ab",
+            "something quite long indeed",
+        ];
+        for value in values {
+            let icons = crate::config::icons::Icons {
+                enabled: true,
+                punctuation: Some(value.to_owned()),
+                numbers: Some(value.to_owned()),
+                time: Some(value.to_owned()),
+                words: Some(value.to_owned()),
+                quote: Some(value.to_owned()),
+                zen: Some(value.to_owned()),
+                custom: Some(value.to_owned()),
+                other: Some(value.to_owned()),
+            };
+            for mode in [ConfigMode::Time, ConfigMode::Quote, ConfigMode::Zen] {
+                let mut state = state(mode);
+                state.icons = &icons;
+                let bar = Bar::build(state);
+                // From its own floor up to a generous width, so both the tight case
+                // and the roomy one are covered.
+                let floor = bar.narrowest() as u16;
+                for width in floor..(floor + 12) {
+                    let lines = bar.render(width, theme).expect("it fits");
+                    let middle = &lines[Bar::ROWS as usize / 2];
+                    let used: usize = middle
+                        .spans
+                        .iter()
+                        .map(|s| columns(s.content.as_ref()))
+                        .sum();
+                    assert_eq!(
+                        used, width as usize,
+                        "{value:?} in {mode:?} at {width}: the row is {used} columns"
+                    );
+                }
+            }
+        }
+    }
+
     /// The box's right border is on the last column, and every cell's text is centred
     /// inside its own cell.
     ///
@@ -1728,7 +1804,7 @@ mod tests {
             let width = u16::try_from(width).expect("a small width");
             let lines = bar.render(width, theme).expect("it fits");
             let line = &lines[0];
-            let used: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+            let used: usize = line.spans.iter().map(|s| columns(s.content.as_ref())).sum();
             assert_eq!(used, width as usize, "width {width}");
         }
     }
@@ -1764,7 +1840,7 @@ mod tests {
                 if span.content.as_ref() == timed {
                     return at;
                 }
-                at += span.content.chars().count();
+                at += columns(span.content.as_ref());
             }
             panic!("the mode cell is not in the row");
         });

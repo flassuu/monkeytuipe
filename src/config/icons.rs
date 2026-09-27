@@ -110,20 +110,66 @@ impl Item {
         }
     }
 
-    /// The built-in glyph, and its Nerd Font name.
-    pub fn built_in(self) -> (&'static str, &'static str) {
-        use crate::screens::topbar::icon;
+    /// The Nerd Font **name** of this item's built-in glyph.
+    ///
+    /// A name and not a character, because a name is the thing that is written down
+    /// and the thing a person would want to change. It used to return both, and only
+    /// the character was ever read — so renaming an icon did nothing at all, with no
+    /// error and no warning, because the name was a caption on a value rather than
+    /// the value. The name is now the value: [`glyph`] resolves it.
+    pub fn built_in(self) -> &'static str {
         match self {
-            Self::Punctuation => ("md-dog", icon::PUNCTUATION),
-            Self::Numbers => ("fa-hashtag", icon::NUMBERS),
-            Self::Time => ("md-clock-time-two", icon::TIME),
-            Self::Words => ("fa-font", icon::WORDS),
-            Self::Quote => ("fa-quote_left", icon::QUOTE),
-            Self::Zen => ("fa-mountain", icon::ZEN),
-            Self::Custom => ("fa-wrench", icon::CUSTOM),
-            Self::Other => ("fa-screwdriver_wrench", icon::OTHER),
+            Self::Punctuation => "md-dog",
+            Self::Numbers => "fa-hashtag",
+            Self::Time => "md-clock-time-two",
+            Self::Words => "fa-font",
+            Self::Quote => "fa-quote_left",
+            Self::Zen => "fa-mountain",
+            Self::Custom => "fa-wrench",
+            Self::Other => "fa-screwdriver_wrench",
         }
     }
+
+    /// The character this item's built-in name resolves to.
+    pub fn glyph(self) -> &'static str {
+        resolve(self.built_in()).unwrap_or("")
+    }
+}
+
+/// The character a Nerd Font name refers to.
+///
+/// The one place a name becomes a glyph, so `config.toml` and the built-in table go
+/// through exactly the same lookup and cannot disagree. A name that is not in the
+/// table resolves to nothing rather than to itself: a name is a name, and drawing the
+/// eight letters `md-` because one of them was misspelled is worse than drawing
+/// nothing.
+///
+/// The table is the one in [`crate::screens::topbar::icon`], where the codepoints live
+/// beside the names they were read from.
+pub fn resolve(name: &str) -> Option<&'static str> {
+    use crate::screens::topbar::icon;
+    icon::TABLE
+        .iter()
+        .find(|(candidate, _)| *candidate == name)
+        .map(|(_, glyph)| *glyph)
+}
+
+/// Turns whatever a config value says into a glyph.
+///
+/// A value that names a glyph is resolved through [`resolve`], so `zen = "fa-mountain"`
+/// and `zen = "󰀁"` are the same request written two ways. A single pasted character
+/// is taken as itself, and is *not* looked up: the user pasted it, so that is what they
+/// meant, even if it happens to spell a name.
+///
+/// Anything else is **nothing**: a misspelled name, or a run of several characters.
+/// Nothing, because the alternative is drawing the six letters `nope` where the user
+/// asked for an icon, and a missing icon is a far smaller problem than a row of text
+/// that was not asked for.
+pub fn as_glyph(value: &str) -> &str {
+    if value.chars().count() == 1 {
+        return value;
+    }
+    resolve(value).unwrap_or("")
 }
 
 /// The user's glyphs, or the built-in ones.
@@ -152,10 +198,13 @@ pub struct Icons {
 impl Icons {
     /// What to draw for an item: the config's key, the built-in glyph, or nothing.
     ///
-    /// One function, so the whole chain is in one place and the bar cannot
-    /// implement a different order of it. An override that is present but empty is an
-    /// answer — "no glyph for this one" — which is why this is not
+    /// One function, so the whole chain is in one place and the bar cannot implement
+    /// a different order of it. An override that is present but empty is an answer —
+    /// "no glyph for this one" — which is why this is not
     /// `filter(|s| !s.is_empty())`.
+    ///
+    /// An override is put through [`as_glyph`], so it may be a Nerd Font name or a
+    /// pasted character, and either way what the user wrote is what gets drawn.
     pub fn glyph(&self, item: Item) -> &str {
         let set = match item {
             Item::Punctuation => &self.punctuation,
@@ -168,10 +217,10 @@ impl Icons {
             Item::Other => &self.other,
         };
         if let Some(glyph) = set {
-            return glyph;
+            return as_glyph(glyph);
         }
         if self.enabled {
-            item.built_in().1
+            item.glyph()
         } else {
             ""
         }
@@ -194,7 +243,7 @@ mod tests {
     #[test]
     fn the_chain_is_config_key_then_built_in_then_nothing() {
         // 1. Nothing set: the built-in glyph.
-        assert_eq!(built_in().glyph(Item::Zen), Item::Zen.built_in().1);
+        assert_eq!(built_in().glyph(Item::Zen), Item::Zen.glyph());
 
         // 2. A key set: that, whatever it is.
         let custom = Icons {
@@ -204,7 +253,7 @@ mod tests {
         };
         assert_eq!(custom.glyph(Item::Zen), "R");
         // And the others are untouched — one key is one item.
-        assert_eq!(custom.glyph(Item::Time), Item::Time.built_in().1);
+        assert_eq!(custom.glyph(Item::Time), Item::Time.glyph());
 
         // 3. `enabled = false`: nothing, even with a key set, because the key is the
         //    first fallback and not the only one.
@@ -215,6 +264,82 @@ mod tests {
         };
         assert_eq!(off.glyph(Item::Zen), "R");
         assert_eq!(off.glyph(Item::Time), "");
+    }
+
+    /// A built-in name that is not in the table resolves to nothing, and this test is
+    /// what says so.
+    ///
+    /// This is the trap that was just walked into. The name and the character used to
+    /// be a pair and only the character was read, so changing `"md-dog"` to anything
+    /// else changed nothing on screen — no error, no warning, no empty icon, just a
+    /// different caption on the same glyph. Now the name *is* the value, so a name
+    /// that does not resolve means no icon, which is visible, and this test fails.
+    #[test]
+    fn every_built_in_name_resolves_to_a_distinct_glyph() {
+        let mut seen = std::collections::BTreeSet::new();
+        for item in Item::ALL {
+            let name = item.built_in();
+            let glyph = item.glyph();
+            assert!(
+                !glyph.is_empty(),
+                "{item:?} names {name:?}, which is not in the glyph table — \
+                 the icon will be blank"
+            );
+            assert_eq!(glyph.chars().count(), 1, "{name:?} is not one character");
+            assert!(
+                seen.insert(glyph.to_owned()),
+                "{item:?} and something else are both {name:?}"
+            );
+        }
+    }
+
+    /// A name in `config.toml` is resolved, so a user can write the same thing the
+    /// built-in table says instead of hunting for a codepoint.
+    #[test]
+    fn a_config_value_can_be_a_name_or_a_character() {
+        let by_name = Icons {
+            enabled: true,
+            zen: Some("fa-wrench".to_owned()),
+            ..Icons::default()
+        };
+        assert_eq!(by_name.glyph(Item::Zen), Item::Custom.glyph());
+
+        let by_character = Icons {
+            enabled: true,
+            zen: Some(Item::Custom.glyph().to_owned()),
+            ..Icons::default()
+        };
+        assert_eq!(by_character.glyph(Item::Zen), Item::Custom.glyph());
+
+        // And something that is neither a name nor one character draws nothing.
+        // Drawing the letters would put six characters where the bar reserved one, and
+        // push the cell — and the frame — out of shape.
+        let neither = Icons {
+            enabled: true,
+            zen: Some("!!".to_owned()),
+            ..Icons::default()
+        };
+        assert_eq!(neither.glyph(Item::Zen), "");
+    }
+
+    /// A pasted character is never looked up, even if it happens to spell a name — the
+    /// user pasted it, so that is what they meant.
+    #[test]
+    fn a_pasted_character_is_taken_literally() {
+        assert_eq!(as_glyph("R"), "R");
+        assert_eq!(as_glyph("󰀁"), "󰀁");
+        assert_eq!(
+            as_glyph("fa-wrench"),
+            resolve("fa-wrench").expect("it resolves")
+        );
+    }
+
+    /// A misspelled name is no glyph rather than the letters of the name.
+    #[test]
+    fn a_name_that_does_not_resolve_is_no_icon() {
+        assert_eq!(as_glyph("not-a-name"), "");
+        assert_eq!(as_glyph("fa-wrenc"), "");
+        assert_eq!(as_glyph("ab"), "");
     }
 
     /// An empty string is an answer — "no glyph for this one" — and not a way of
@@ -231,7 +356,7 @@ mod tests {
             ..Icons::default()
         };
         assert_eq!(one_off.glyph(Item::Zen), "");
-        assert_eq!(one_off.glyph(Item::Time), Item::Time.built_in().1);
+        assert_eq!(one_off.glyph(Item::Time), Item::Time.glyph());
     }
 
     /// `enabled = false` with no keys is the setting for a terminal that draws these
@@ -319,7 +444,7 @@ mod tests {
         )
         .expect("a config with no icons table");
         assert!(parsed.icons.enabled, "the built-ins are off by default");
-        assert_eq!(parsed.icons.glyph(Item::Zen), Item::Zen.built_in().1);
+        assert_eq!(parsed.icons.glyph(Item::Zen), Item::Zen.glyph());
     }
 
     /// And a config that sets them is read, including the empty-string case that has
