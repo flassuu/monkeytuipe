@@ -14,6 +14,7 @@ use crate::config::theme::Theme;
 use crate::config::Config;
 use crate::engine::{Mode, Test};
 use crate::screens::input::{self};
+use crate::screens::modes::{Key as PressedKey, Mode as Focus, Surface};
 use crate::screens::topbar::{Bar, BarState};
 use crate::screens::{Effect, Row, Screen, ScreenKind, ScreenState};
 use crate::stats::result::{score as score_test, Scoring};
@@ -141,6 +142,14 @@ pub struct App {
     /// be closed by that screen too.
     input: Option<input::Window>,
 
+    /// Which mode the keyboard is in. See [`crate::screens::modes`].
+    ///
+    /// Not derivable from whether the window is open, and the difference matters:
+    /// the window being open is what makes the mode *input*, but a screen can
+    /// collect text with no window on screen, and then letters still have to be
+    /// text.
+    mode: Focus,
+
     /// The ApeKey client, built once the key is known.
     ///
     /// Built lazily rather than in `new` because the key can be edited while the
@@ -203,6 +212,7 @@ impl App {
             started_at_ms: None,
             message: None,
             input: None,
+            mode: Focus::Navigation,
             api: None,
             profile: None,
             bests: Default::default(),
@@ -457,7 +467,7 @@ impl App {
     /// The engine's own `mode` would be circular — the test is rebuilt from this
     /// very function — and keeping a second copy of the settings in the engine
     /// is how `mode = "words"` in a config file ends up ignored.
-    fn test_mode(&self) -> Mode {
+    fn test_mode_inner(&self) -> Mode {
         use crate::config::Mode as ConfigMode;
         match self.config.test.mode {
             ConfigMode::Time => Mode::Time,
@@ -680,9 +690,15 @@ impl App {
         self.bar.interactive
     }
 
-    /// Opens the one input window, empty.
+    /// Opens the one input window, empty, and puts the keyboard in it.
+    ///
+    /// Opening and switching are one operation on purpose. A window that is open
+    /// while the mode still says "navigation" is a state where a letter is a
+    /// command and a character at the same time, and every bug that produces
+    /// comes from that state existing.
     pub fn open_input(&mut self, reason: input::Reason) {
         self.input = Some(input::Window::new(reason));
+        self.mode = Focus::Input;
     }
 
     /// Opens the one input window with something already in it, which is what
@@ -690,6 +706,7 @@ impl App {
     /// on an empty field the user has to retype.
     pub fn open_input_with(&mut self, reason: input::Reason, text: impl Into<String>) {
         self.input = Some(input::Window::prefilled(reason, text));
+        self.mode = Focus::Input;
     }
 
     /// Opens the window for a length, prefilled with the bare number.
@@ -787,9 +804,12 @@ impl App {
     /// retype.
     pub fn close_input(&mut self, outcome: input::Outcome) {
         if matches!(outcome, input::Outcome::Invalid(_)) {
+            // The window stays open, so the mode stays on input: a window the user
+            // is still typing into must keep the keyboard.
             return;
         }
         self.input = None;
+        self.mode = Focus::Navigation;
         match outcome {
             input::Outcome::Cancelled => {}
             input::Outcome::Length(field, value) => {
@@ -805,6 +825,27 @@ impl App {
                 self.run_command(index);
             }
             input::Outcome::Invalid(_) => unreachable!("handled above"),
+        }
+    }
+
+    /// Which mode the keyboard is in.
+    pub fn mode(&self) -> Focus {
+        self.mode
+    }
+
+    /// Switches mode.
+    ///
+    /// Going to input mode without a window is the app's problem to fix rather
+    /// than the caller's: a mode that says "keys are text" with no field to put
+    /// them in is a mode that eats letters, which is the one thing input mode must
+    /// never do.
+    pub fn set_mode(&mut self, mode: Focus) {
+        self.mode = mode;
+        if mode == Focus::Input && self.input.is_none() {
+            self.input = Some(input::Window::new(input::Reason::Command));
+        }
+        if mode == Focus::Navigation {
+            self.input = None;
         }
     }
 
@@ -976,12 +1017,15 @@ impl App {
 
     /// The mode the current test is running in.
     ///
-    /// Public because a screen has to render differently for zen: there is no
+    /// The mode the *test* is running in, which is not the same thing as
+    /// [`Self::mode`]: that one is about the keyboard.
+    ///
+    /// Public because a screen has to render differently for zen — there is no
     /// target there, so the words pane draws what was typed rather than what was
-    /// to be typed. That is a rendering rule, and the screen needs to know which
-    /// mode it is drawing.
-    pub fn mode(&self) -> Mode {
-        self.test_mode()
+    /// to be typed — and two things called "mode" is the price of an app with a
+    /// keyboard mode and a test mode in it. The names say which is which.
+    pub fn test_mode(&self) -> Mode {
+        self.test_mode_inner()
     }
 
     /// The display width of every word, for laying the word pane out.
@@ -1637,28 +1681,142 @@ impl App {
 
     /// Applies one raw key event. Returns `true` when the app should quit.
     fn on_key(&mut self, key: KeyEvent) -> anyhow::Result<bool> {
-        if key.kind != KeyEventKind::Press {
+        use crate::screens::modes::{self as modes, Direction, Intent};
+
+        let key = PressedKey::from_event(key);
+        if !key.press {
+            // Terminals that report releases would otherwise fire every binding
+            // twice and type every letter twice.
             return Ok(false);
         }
 
-        // A modifier is never text. `ctrl+c` has to quit even with the window
-        // open — a modal that swallowed it would be a modal you could not
-        // escape — so only bare keys go to the window.
-        if self.input.is_some() && key.modifiers.is_empty() {
+        // The mode decides what a key means, and it is asked before anything
+        // else: the two modes disagree about whether `q` is a word or a command,
+        // and nothing further down can be right if this is wrong.
+        let surface = self.surface();
+        let focus = self.mode();
+        match modes::intent(key, focus, surface, self.input.is_some()) {
+            Intent::OpenInput => {
+                // Opening and switching are one thing, so they cannot disagree: a
+                // window that is open with the mode still on navigation is a state
+                // where `q` is a command and a letter at the same time.
+                self.open_input(input::Reason::Command);
+                self.set_mode(Focus::Input);
+                return Ok(false);
+            }
+            Intent::CloseInput => {
+                // Closing without acting. A palette that is dismissed must not run
+                // whatever it happened to have highlighted.
+                self.input = None;
+                self.set_mode(Focus::Navigation);
+                return Ok(false);
+            }
+            Intent::Switch => {
+                self.set_mode(focus.other());
+                return Ok(false);
+            }
+            _ => {}
+        }
+
+        // In input mode the window has the keyboard, whole. It is the field's
+        // mode: every bare key is the field's, including the ones the rules above
+        // did not claim, so that a key the window does not use is still a key the
+        // window owns rather than a key that types an `f` into the test.
+        //
+        // A *modified* key is the exception, and it is the important one: `ctrl+c`
+        // has to quit with the window open, or there is a modal with no way out.
+        if self.input.is_some() && focus == Focus::Input && !key.ctrl && !key.alt {
             let Some(outcome) = self.input.as_mut().and_then(|w| w.key(key.code)) else {
-                // A key the window did not act on is still a key the window owns:
-                // letting it reach the screen would type `f` into the test while
-                // the user is looking at a search field.
                 return Ok(false);
             };
             self.close_input(outcome);
             return Ok(false);
         }
 
-        let Some(action) = self.resolve(key) else {
+        match modes::intent(key, focus, surface, self.input.is_some()) {
+            Intent::Skip => return self.on_action(Action::Skip),
+            Intent::Move(direction) => {
+                let action = match direction {
+                    Direction::Up => Action::Up,
+                    Direction::Down => Action::Down,
+                    Direction::Left => Action::Left,
+                    Direction::Right => Action::Right,
+                };
+                return self.on_action(action);
+            }
+            Intent::Text(c) => return self.on_action(Action::Char(c)),
+            Intent::Command(letter) => {
+                // A letter that is a command. `q` quits, the way it does in vim and
+                // in every other program that has letters.
+                if let Some(action) = self.action_for_letter(letter) {
+                    return self.on_action(action);
+                }
+                // A letter that is not a command does nothing. It is not turned
+                // into something nobody asked for, and it is not passed on as text
+                // either: on a browsing screen there is nothing to type into.
+            }
+            Intent::Nothing | Intent::OpenInput | Intent::CloseInput | Intent::Switch => {}
+        }
+
+        // A key nothing claimed: the configured bindings, then the screen.
+        self.on_keybind(key)
+    }
+
+    /// Which surface the keyboard rules apply to.
+    ///
+    /// A screen that wants text gets text, whatever it is. That is the same rule
+    /// the typing screen uses, and the reason is the same: a key that means
+    /// something and is also a letter has to be a letter, or a word cannot be
+    /// typed.
+    fn surface(&self) -> Surface {
+        if self.screen.wants_text() {
+            // The typing screen is the one surface where a letter is *always*
+            // text, including the navigation-mode letters. An editor is a field
+            // but it is not a test, and the difference is that the vim keys are
+            // useful on the row list around it.
+            if matches!(self.screen, crate::screens::ScreenState::Typing(_)) {
+                Surface::Typing
+            } else {
+                Surface::Editing
+            }
+        } else {
+            Surface::Browsing
+        }
+    }
+
+    /// What a letter means in navigation mode, on a screen where letters are
+    /// commands.
+    ///
+    /// Only the ones that are the same everywhere. Anything screen-specific stays
+    /// with the screen: a settings screen is the only thing that can know that
+    /// `q` means "back" there, and the app is the only thing that can know that
+    /// `q` means "quit" everywhere.
+    fn action_for_letter(&self, letter: char) -> Option<Action> {
+        match letter {
+            'q' => Some(Action::Quit),
+            'j' | 'k' | 'h' | 'l' => None,
+            '?' => Some(Action::Settings),
+            _ => None,
+        }
+    }
+
+    /// Runs the configured bindings and then the screen, for a key the mode rules
+    /// did not claim.
+    fn on_keybind(&mut self, key: PressedKey) -> anyhow::Result<bool> {
+        let event = KeyEvent {
+            code: key.code,
+            modifiers: key.modifiers(),
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        let Some(action) = self.resolve(event) else {
             return Ok(false);
         };
+        self.on_action(action)
+    }
 
+    /// Hands an action to the screen and applies what comes back.
+    fn on_action(&mut self, action: Action) -> anyhow::Result<bool> {
         let effects = match &mut self.screen {
             ScreenState::Typing(screen) => screen.handle(action),
             ScreenState::Settings(screen) => screen.handle(action),
@@ -3103,6 +3261,243 @@ mod tests {
             before, after,
             "the words did not change with the difficulty"
         );
+    }
+
+    // ---- the two modes --------------------------------------------------
+
+    use crate::screens::modes::Mode as Focus;
+
+    /// Escape opens the window and the keyboard with it. The two cannot be
+    /// separate: a window that is open while the mode says "navigation" is a state
+    /// where a letter is a command and a character at the same time.
+    #[test]
+    fn opening_the_window_and_taking_the_keyboard_are_the_same_thing() {
+        let mut app = app();
+        assert_eq!(app.mode(), Focus::Navigation);
+        assert!(!app.input_is_open());
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert_eq!(
+            app.mode(),
+            Focus::Input,
+            "the window is open but the mode is not"
+        );
+        assert!(app.input_is_open());
+    }
+
+    /// And whatever opened the window, however it was opened, brought the mode with
+    /// it. A bar button that opens a dialog and leaves the keyboard in navigation
+    /// would be a dialog that types into the test.
+    #[test]
+    fn every_way_of_opening_the_window_takes_the_keyboard() {
+        use crate::config::bar::Field;
+        let ways: [fn(&mut App); 3] = [
+            |app| app.open_input(input::Reason::Command),
+            |app| app.open_input_with(input::Reason::Text, "x"),
+            |app| app.open_input(input::Reason::Length(Field::Time)),
+        ];
+        for open in ways {
+            let mut app = app();
+            assert_eq!(app.mode(), Focus::Navigation, "the premise changed");
+            open(&mut app);
+            assert_eq!(app.mode(), Focus::Input);
+            assert!(app.input_is_open());
+        }
+    }
+
+    /// Closing without acting must not run whatever was highlighted. A dismissed
+    /// palette that runs a command is a palette that does something on the way out.
+    #[test]
+    fn escape_closes_the_window_without_running_anything() {
+        let mut app = app();
+        let before = app.config.test.punctuation;
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        for c in "punc".chars() {
+            app.on_key(press(KeyCode::Char(c))).expect("no io");
+        }
+        // The first match is highlighted.
+        let highlighted = app
+            .input_window()
+            .and_then(|w| w.selected())
+            .map(|m| m.command);
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert!(!app.input_is_open());
+        assert_eq!(app.mode(), Focus::Navigation);
+        assert_eq!(
+            app.config.test.punctuation, before,
+            "escape ran the highlighted command"
+        );
+        assert!(highlighted.is_some(), "nothing was highlighted to dismiss");
+    }
+
+    /// An unreadable value leaves the window open, so it must also leave the
+    /// keyboard in it. Closing the window here would throw away the typing and
+    /// then send the next letter to the test.
+    #[test]
+    fn a_value_that_cannot_be_read_keeps_the_keyboard_too() {
+        let mut app = app_with_test(crate::config::Mode::Time);
+        app.open_input_with(input::Reason::Length(Field::Time), "");
+        app.close_input(input::Outcome::Invalid("soon".to_owned()));
+        assert!(app.input_is_open());
+        assert_eq!(
+            app.mode(),
+            Focus::Input,
+            "the window is open but the keyboard is not"
+        );
+    }
+
+    /// `tab` is *skip* on the typing screen and a mode switch everywhere else. The
+    /// typing screen is the one place where taking it away would break the command
+    /// every monkeytype user knows.
+    #[test]
+    fn tab_is_skip_on_the_typing_screen_and_a_mode_switch_elsewhere() {
+        let mut app = app();
+        app.on_key(press(KeyCode::Tab)).expect("no io");
+        assert_eq!(
+            app.mode(),
+            Focus::Navigation,
+            "tab took the keyboard on the typing screen"
+        );
+        assert!(!app.input_is_open());
+
+        app.on_key(press(KeyCode::F(2))).expect("no io");
+        assert_eq!(app.screen_kind(), ScreenKind::Settings);
+        app.on_key(press(KeyCode::Tab)).expect("no io");
+        assert_eq!(
+            app.mode(),
+            Focus::Input,
+            "tab did not switch on the settings screen"
+        );
+        assert!(app.input_is_open());
+    }
+
+    /// `i` enters input mode, the way it does in vim — and only where a letter is
+    /// not text. On the typing screen it is a letter.
+    #[test]
+    fn i_is_a_mode_key_away_from_the_test_and_a_letter_in_it() {
+        let mut app = app();
+        app.on_key(press(KeyCode::F(2))).expect("no io");
+        app.on_key(press(KeyCode::Char('i'))).expect("no io");
+        assert_eq!(
+            app.mode(),
+            Focus::Input,
+            "i did not open the window on the settings screen"
+        );
+
+        let mut app = self::app();
+        for c in "i".chars() {
+            app.type_char(c);
+        }
+        assert_eq!(
+            app.test().words()[0].input(),
+            "i",
+            "i did not reach the words on the typing screen"
+        );
+        assert_eq!(app.mode(), Focus::Navigation);
+    }
+
+    /// `q` quits from a browsing screen. It has to: a mode where letters are
+    /// commands and `q` is not one of them is a mode where `q` does nothing, and
+    /// that is what every other program with letters does.
+    #[test]
+    fn q_quits_from_a_browsing_screen() {
+        let mut app = self::app();
+        app.on_key(press(KeyCode::F(2))).expect("no io");
+        assert!(
+            app.on_key(press(KeyCode::Char('q'))).expect("no io"),
+            "q did not quit from the settings screen"
+        );
+    }
+
+    /// And it is a letter on the typing screen, which is the whole reason the mode
+    /// has two settings and not one.
+    #[test]
+    fn q_is_a_letter_on_the_typing_screen() {
+        let mut app = self::app();
+        app.type_char('q');
+        assert_eq!(app.test().words()[0].input(), "q");
+        assert!(!app.test().is_finished());
+    }
+
+    /// The vim keys move the settings selection, and each one only in its own
+    /// direction — which is the bug this whole change started from.
+    #[test]
+    fn the_vim_keys_move_the_settings_selection() {
+        use crate::screens::modes::Direction;
+        let mut app = app();
+        app.on_key(press(KeyCode::F(2))).expect("no io");
+        let start = app.selected_row();
+        app.on_key(press(KeyCode::Char('j'))).expect("no io");
+        assert_ne!(app.selected_row(), start, "j did not move down");
+        app.on_key(press(KeyCode::Char('k'))).expect("no io");
+        assert_eq!(app.selected_row(), start, "k did not move back up");
+        let _ = Direction::Down;
+    }
+
+    /// And they are letters in the window, because the field is where they belong.
+    #[test]
+    fn the_vim_keys_are_letters_in_the_window() {
+        let mut app = app();
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        for c in "hjkl".chars() {
+            app.on_key(press(KeyCode::Char(c))).expect("no io");
+        }
+        assert_eq!(app.input_window().map(|w| w.text()), Some("hjkl"));
+    }
+
+    /// The status line says which mode the keyboard is in. A mode that cannot be
+    /// seen is a mode nobody can learn.
+    #[test]
+    fn the_status_line_says_which_mode_the_keyboard_is_in() {
+        let mut app = app();
+        assert!(app.mode() == Focus::Navigation);
+        assert_eq!(Focus::Navigation.label(), "NAV");
+        assert_eq!(Focus::Input.label(), "INS");
+        app.on_key(press(KeyCode::Esc)).expect("no io");
+        assert_eq!(app.mode().label(), "INS");
+    }
+
+    /// Every mode, every surface, both window states, and no key panics or falls
+    /// out of the rules. The rules are asked on *every* key, so a gap in them is
+    /// not a missing feature — it is a keypress that does something undefined.
+    #[test]
+    fn no_key_does_anything_undefined_in_any_mode() {
+        let keys = [
+            KeyCode::Char('a'),
+            KeyCode::Char('j'),
+            KeyCode::Char('q'),
+            KeyCode::Char('i'),
+            KeyCode::Char(' '),
+            KeyCode::Enter,
+            KeyCode::Esc,
+            KeyCode::Tab,
+            KeyCode::Backspace,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::F(2),
+        ];
+        for screen in [
+            ScreenKind::Typing,
+            ScreenKind::Settings,
+            ScreenKind::Results,
+        ] {
+            for open in [false, true] {
+                for code in keys {
+                    // A fresh app per key: `q` quits and `enter` can leave, and a
+                    // loop that carried one app across all of them would only be
+                    // testing the first key.
+                    let mut one = app();
+                    if screen != ScreenKind::Typing {
+                        one.show_screen(screen);
+                    }
+                    if open {
+                        one.open_input(input::Reason::Command);
+                    }
+                    let _ = one.on_key(press(code));
+                }
+            }
+        }
     }
 
     #[test]

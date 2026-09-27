@@ -5,8 +5,10 @@
 //! applies. That keeps the data flow one-directional and lets a screen be
 //! unit-tested without an `App`.
 
+pub mod chrome;
 pub mod commands;
 pub mod input;
+pub mod modes;
 pub mod results;
 pub mod settings;
 pub mod topbar;

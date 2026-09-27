@@ -271,7 +271,7 @@ fn render_words(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
     // Zen shows what was typed, not what was there to type: there is no target
     // and nothing to be wrong about. The wrapping has to measure the same thing
     // it draws, or the lines will not line up.
-    let zen = app.mode() == crate::engine::Mode::Zen;
+    let zen = app.test_mode() == crate::engine::Mode::Zen;
     let widths: Vec<usize> = shown
         .iter()
         .map(|w| {
@@ -454,7 +454,6 @@ fn render_counters(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
     } else {
         "type to start · esc commands · ctrl+c quit"
     };
-
     let mut spans = Vec::new();
     for (label, value) in [
         ("wpm", format!("{:.0}", app.wpm())),
@@ -465,6 +464,13 @@ fn render_counters(app: &App, frame: &mut Frame, area: Rect, theme: Theme) {
         spans.push(Span::styled(value, theme.value()));
         spans.push(Span::raw("  "));
     }
+    // The mode, on the same line as the counters, because that is where the eye
+    // already is and the mode is the thing that decides what the next key does.
+    spans.push(Span::styled("· ", theme.chrome()));
+    spans.push(Span::styled(
+        format!("[{}] ", app.mode().label()),
+        theme.chrome(),
+    ));
     spans.push(Span::styled(format!("·  {hint}"), theme.chrome()));
 
     frame.render_widget(

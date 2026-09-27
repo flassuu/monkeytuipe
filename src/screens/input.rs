@@ -20,9 +20,7 @@
 //! rather than a duration.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::text::Line;
 use ratatui::Frame;
 
 use crate::config::bar::Field;
@@ -372,83 +370,38 @@ pub fn parse_duration(input: &str) -> Option<u32> {
 
 /// Draws the window over whatever is on screen.
 ///
-/// Centred, and cleared underneath, the way the site's modals are: a box drawn
-/// on top of the words would leave them legible through it, and a half-legible
-/// background is harder to read than an opaque one.
+/// The chrome — the box, the title, the field, the hint — is shared with the
+/// settings menu in [`crate::screens::chrome`], because two windows that are the
+/// same mechanism have to look like the same mechanism.
 pub fn render(window: &Window, area: Rect, theme: Theme, frame: &mut Frame) {
-    let width = window.width(area.width);
-    if width == 0 || area.height == 0 {
+    let Some(chrome) = crate::screens::chrome::Chrome::place(
+        area,
+        window.width(area.width),
+        window.height(),
+        window.reason.title(),
+        theme,
+        frame,
+    ) else {
         return;
-    }
-    let height = window.height().min(area.height);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    // Slightly above the middle, which is where the eye goes first and where the
-    // site puts its modals.
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let rect = Rect::new(x, y, width, height);
-
-    frame.render_widget(Clear, rect);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.accent))
-        .style(Style::default().fg(theme.foreground).bg(theme.surface))
-        .title(format!(" {} ", window.reason.title()));
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
+    };
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(field_line(&window.text, theme));
+    lines.push(crate::screens::chrome::field(&window.text, theme));
     if let Some(preview) = window.preview() {
-        lines.push(Line::from(Span::styled(
-            preview,
-            Style::default().fg(theme.muted),
-        )));
+        lines.push(crate::screens::chrome::hint(&preview, theme));
     }
     for (offset, found) in window.matches().into_iter().take(MAX_VISIBLE).enumerate() {
-        let selected = offset == window.cursor;
-        lines.push(match_line(
+        lines.push(crate::screens::chrome::row(
             commands::display(found.command),
-            selected,
+            offset == window.cursor,
             theme,
         ));
     }
     // The hint is the last thing, so a long list cannot push it off.
-    if (lines.len() as u16) < inner.height {
-        lines.push(Line::from(Span::styled(
-            window.reason.hint(),
-            Style::default().fg(theme.muted),
-        )));
+    if (lines.len() as u16) < chrome.inner.height {
+        lines.push(crate::screens::chrome::hint(window.reason.hint(), theme));
     }
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
-/// The field: what has been typed, with a block caret on the next cell.
-fn field_line(text: &str, theme: Theme) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        text.to_owned(),
-        Style::default().fg(theme.foreground),
-    )];
-    spans.push(Span::styled("█", Style::default().fg(theme.accent)));
-    Line::from(spans)
-}
-
-/// One line of the match list.
-fn match_line(label: &str, selected: bool, theme: Theme) -> Line<'static> {
-    let style = if selected {
-        Style::default()
-            .fg(theme.background)
-            .bg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.foreground)
-    };
-    // A marker rather than a colour alone, so the highlight is still findable on
-    // a monochrome terminal.
-    Line::from(vec![
-        Span::styled(if selected { "▸ " } else { "  " }, Style::default()),
-        Span::styled(label.to_owned(), style),
-    ])
+    chrome.draw(lines, frame);
 }
 
 #[cfg(test)]
