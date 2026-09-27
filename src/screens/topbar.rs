@@ -88,16 +88,18 @@ pub mod icon {
     /// private-use character is invisible in a diff and in review — the one place
     /// where a wrong glyph would otherwise be cheapest to introduce.
     pub const TABLE: [(&str, &str); 8] = [
-        // A dog, for punctuation. `at` would have been the obvious choice and its
-        // codepoint is U+F1FA, not the U+F1E0 that `share_nodes` lives at.
-        ("md-dog", "\u{f0a43}"),
+        // `fa-at` — the `@` sign, for punctuation. U+F1FA, which is where `at`
+        // actually is; the U+F1E0 that was written here first is `share_nodes`.
+        // This went out as a dog's head and came back: a dog is a font's idea of an
+        // animal and an `@` is what the setting is for, and the two are not the same
+        // request however alike the shapes.
+        ("fa-at", "\u{f1fa}"),
         // `fa-hashtag`, unchanged and verified.
         ("fa-hashtag", "\u{f292}"),
-        // A filled clock with the hand at two. `md-clock-time-two` is the filled one
-        // and `md-clock-time-two-outline` the outline; `md-clock-time-four` — what
-        // this was labelled as — is U+F1442, not the U+F1142 that
-        // `minus-box-multiple-outline` lives at.
-        ("md-clock-time-two", "\u{f1440}"),
+        // `md-clock` — a filled clock face. U+F0954. `md-clock-outline` is U+F0150,
+        // which is the outline, and the `md-clock-time-*` family is a different set
+        // of glyphs again, one per hand position.
+        ("md-clock", "\u{f0954}"),
         // `fa-font`, unchanged and verified.
         ("fa-font", "\u{f031}"),
         // The *left* quote mark, for a published passage. This was U+F10E, which is
@@ -115,12 +117,12 @@ pub mod icon {
         ("fa-screwdriver_wrench", "\u{ef70}"),
     ];
 
-    /// A dog's head, for punctuation.
-    pub const PUNCTUATION: &str = "\u{f0a43}";
+    /// An `@`, for punctuation.
+    pub const PUNCTUATION: &str = "\u{f1fa}";
     /// A `#`, for numbers.
     pub const NUMBERS: &str = "\u{f292}";
-    /// A clock reading two, for the timed test.
-    pub const TIME: &str = "\u{f1440}";
+    /// A filled clock face, for the timed test.
+    pub const TIME: &str = "\u{f0954}";
     /// A letter, for counting words.
     pub const WORDS: &str = "\u{f031}";
     /// A quotation mark, for a published passage.
@@ -779,7 +781,7 @@ fn render_cell(
         if index > 0 {
             spans.push(Span::raw(" ".repeat(CELL_GAP)));
         }
-        spans.push(button_span(
+        spans.extend(button_spans(
             button,
             Some(index) == selected_offset,
             theme,
@@ -814,10 +816,22 @@ fn frame_style(theme: Theme) -> Style {
 /// `auto` theme — where the foreground sits very close to the muted colour — the
 /// underline was doing most of the work of saying which button the arrows were on.
 ///
+/// The weight goes on the **label and not on the glyph**, and that split is the whole
+/// of [`button_spans`]. A Nerd Font has no bold: the terminal has to invent one, and
+/// what it invents is a smeared outline, so a bolded glyph draws visibly larger than
+/// an unbolded one. The glyph and the label used to be a single span, so moving the
+/// arrows onto a button made its icon swell — the icon changed size every time the
+/// selection moved, which reads as a rendering fault rather than as a selection.
+///
 /// `icons` is false on a terminal too narrow for the glyphs, and then the label is
 /// drawn alone rather than being pushed off the end of its cell. See
 /// [`Bar::render`].
-pub fn button_span(button: &Button, selected: bool, theme: Theme, icons: bool) -> Span<'static> {
+pub fn button_spans(
+    button: &Button,
+    selected: bool,
+    theme: Theme,
+    icons: bool,
+) -> Vec<Span<'static>> {
     let style = if button.disabled {
         Style::default().fg(theme.muted)
     } else if button.active {
@@ -831,14 +845,18 @@ pub fn button_span(button: &Button, selected: bool, theme: Theme, icons: bool) -
     } else {
         Style::default().fg(theme.muted)
     };
-    // The glyph and the label are one span, so the two can never be styled
-    // differently — a bold label must not leave a dim icon sitting in front of it.
-    let text = if !icons || button.icon.is_empty() {
-        button.label.clone()
-    } else {
-        format!("{} {}", button.icon, button.label)
-    };
-    Span::styled(text, style)
+    // The glyph takes the label's *colour* — the same colour, so the two are one
+    // thing and the icon does not look like a dim smudge in front of a bright word —
+    // and none of its modifiers, so the weight is the label's alone.
+    let plain = Style::default().fg(style.fg.unwrap_or(theme.muted));
+    if !icons || button.icon.is_empty() {
+        return vec![Span::styled(button.label.clone(), style)];
+    }
+    vec![
+        Span::styled(button.icon.clone(), plain),
+        Span::raw(" "),
+        Span::styled(button.label.clone(), style),
+    ]
 }
 
 /// One interface string.
@@ -1252,8 +1270,9 @@ mod tests {
         assert_eq!(bar.activate(), None, "an inert bar still activated a field");
     }
 
+    /// The *label's* span, which is the one the four states are about.
     fn button(active: bool, selected: bool) -> ratatui::text::Span<'static> {
-        button_span(
+        let spans = button_spans(
             &Button {
                 label: "punctuation".to_owned(),
                 icon: icon::PUNCTUATION.to_owned(),
@@ -1264,7 +1283,11 @@ mod tests {
             selected,
             crate::config::theme::ThemeName::Gruvbox.resolve(),
             true,
-        )
+        );
+        spans
+            .into_iter()
+            .last()
+            .expect("a label span, whatever the state")
     }
 
     /// The active option is a highlighted word: the accent colour, bold. No
@@ -1318,7 +1341,7 @@ mod tests {
     #[test]
     fn a_disabled_option_is_not_drawn_as_active() {
         let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
-        let style = button_span(
+        let spans = button_spans(
             &Button {
                 label: "punctuation".to_owned(),
                 icon: icon::PUNCTUATION.to_owned(),
@@ -1329,8 +1352,8 @@ mod tests {
             false,
             theme,
             true,
-        )
-        .style;
+        );
+        let style = spans.last().expect("a label span").style;
         assert_eq!(style.fg, Some(theme.muted));
         assert!(!style.add_modifier.contains(Modifier::BOLD));
     }
@@ -1617,9 +1640,9 @@ mod tests {
         // icon is wrong or the set has moved it — and both need a human, because a
         // wrong one is indistinguishable from a right one on screen.
         let expected: [(&str, u32); 8] = [
-            ("md-dog", 0xf0a43),
+            ("fa-at", 0xf1fa),
             ("fa-hashtag", 0xf292),
-            ("md-clock-time-two", 0xf1440),
+            ("md-clock", 0xf0954),
             ("fa-font", 0xf031),
             ("fa-quote_left", 0xf10d),
             ("fa-mountain", 0xef08),
@@ -1722,6 +1745,101 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A glyph is never bold, whatever the selection is doing — and never underlined.
+    ///
+    /// This is the bug: the glyph and the label were one span, so moving the arrows
+    /// onto a button put `Modifier::BOLD` on its icon as well. A Nerd Font has no
+    /// bold, so the terminal has to invent one, and what it invents is a smeared
+    /// outline — which draws the icon visibly *larger*. Every icon in the bar changed
+    /// size every time the selection moved, and an icon that changes size when you
+    /// look at it reads as a rendering fault rather than as a selection.
+    ///
+    /// The label is still bold, because that is what says which button the arrows are
+    /// on, and the glyph takes the label's colour so the two do not look like two
+    /// different things.
+    #[test]
+    fn a_glyph_keeps_its_weight_however_the_selection_moves() {
+        let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
+        for selected in [false, true] {
+            for active in [false, true] {
+                for disabled in [false, true] {
+                    let spans = button_spans(
+                        &Button {
+                            label: "punctuation".to_owned(),
+                            icon: icon::PUNCTUATION.to_owned(),
+                            field: Field::Punctuation,
+                            active,
+                            disabled,
+                        },
+                        selected,
+                        theme,
+                        true,
+                    );
+                    assert_eq!(spans.len(), 3, "the glyph and the label are one span");
+                    let (glyph, gap, label) = (&spans[0], &spans[1], &spans[2]);
+                    assert_eq!(glyph.content.as_ref(), icon::PUNCTUATION);
+                    assert_eq!(gap.content.as_ref(), " ");
+                    assert_eq!(label.content.as_ref(), "punctuation");
+                    assert_eq!(
+                        glyph.style.add_modifier,
+                        Modifier::empty(),
+                        "selected={selected} active={active} disabled={disabled}: \
+                         the glyph carries a modifier, and a Nerd Font has no bold \
+                         to carry — the terminal smears it and the icon grows"
+                    );
+                    assert!(
+                        !glyph
+                            .style
+                            .add_modifier
+                            .intersects(Modifier::BOLD | Modifier::UNDERLINED),
+                        "selected={selected}: the glyph is bold or underlined"
+                    );
+                    // The colour is shared, so the icon is not a dim smudge in front
+                    // of a bright word.
+                    assert_eq!(
+                        glyph.style.fg, label.style.fg,
+                        "selected={selected} active={active}: the glyph and the label \
+                         are different colours"
+                    );
+                }
+            }
+        }
+    }
+
+    /// And the weight moves *with* the selection, so the fix did not simply turn bold
+    /// off everywhere: the label is what says where the arrows are.
+    #[test]
+    fn the_label_is_still_bold_when_it_is_selected() {
+        let theme = crate::config::theme::ThemeName::Gruvbox.resolve();
+        let spans = button_spans(
+            &Button {
+                label: "punctuation".to_owned(),
+                icon: icon::PUNCTUATION.to_owned(),
+                field: Field::Punctuation,
+                active: false,
+                disabled: false,
+            },
+            true,
+            theme,
+            true,
+        );
+        assert!(spans[2].style.add_modifier.contains(Modifier::BOLD));
+
+        let spans = button_spans(
+            &Button {
+                label: "punctuation".to_owned(),
+                icon: icon::PUNCTUATION.to_owned(),
+                field: Field::Punctuation,
+                active: false,
+                disabled: false,
+            },
+            false,
+            theme,
+            true,
+        );
+        assert!(!spans[2].style.add_modifier.contains(Modifier::BOLD));
     }
 
     /// The box's right border is on the last column, and every cell's text is centred
@@ -1830,11 +1948,12 @@ mod tests {
             let lines = bar.render(200, theme).expect("it fits");
             // The middle row of the box, which is where the settings are.
             let line = &lines[Bar::ROWS as usize / 2];
-            // Each button is its own span, so the mode cell starts at the first
-            // button whose label is the timed one. The glyph comes from the constant
-            // rather than being written here, because a test that spells out the
-            // glyph is a second place for it to be wrong.
-            let timed = format!("{} time", icon::TIME);
+            // The timed button's *label* is its own span, and the offset of that span
+            // is what has to hold still. The glyph is a separate span in front of it
+            // (see `button_spans`: the label carries the weight and the glyph does
+            // not), and the glyph is the same width in every mode, so the label's
+            // offset moves exactly when the cell does.
+            let timed = en(Key::ModeTime);
             let mut at = 0usize;
             for span in &line.spans {
                 if span.content.as_ref() == timed {

@@ -119,9 +119,9 @@ impl Item {
     /// the value. The name is now the value: [`glyph`] resolves it.
     pub fn built_in(self) -> &'static str {
         match self {
-            Self::Punctuation => "md-dog",
+            Self::Punctuation => "fa-at",
             Self::Numbers => "fa-hashtag",
-            Self::Time => "md-clock-time-two",
+            Self::Time => "md-clock",
             Self::Words => "fa-font",
             Self::Quote => "fa-quote_left",
             Self::Zen => "fa-mountain",
